@@ -161,7 +161,7 @@ class AditsVoiceStudioApp(ctk.CTk):
         engine_names = " + ".join(e.name.split("(")[0].split(" ")[0]
                                   for e in self._available_engines)
         ctk.CTkLabel(header,
-                     text=f"Text-to-Speech Studio, Audio FX & Voice Cloning",
+                     text=f"Text-to-Speech, Audio FX & Voice Cloning",
                      font=FONTS["body_small"],
                      text_color=COLORS["text_muted"]).grid(row=1, column=1, sticky="w")
 
