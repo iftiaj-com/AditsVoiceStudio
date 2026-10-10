@@ -1,6 +1,6 @@
-# VoiceCraft Developer & Architecture Guide
+# Adits Voice Studio Developer & Architecture Guide
 
-Welcome to the **VoiceCraft** codebase guide. This document serves as a technical manual for developers, designers, and AI agents. It describes the application's structure, explains the system architecture, and provides step-by-step guides on how to extend the platform with new text-to-speech (TTS) engines, audio effects, and customizations.
+Welcome to the **Adits Voice Studio** codebase guide. This document serves as a technical manual for developers, designers, and AI agents. It describes the application's structure, explains the system architecture, and provides step-by-step guides on how to extend the platform with new text-to-speech (TTS) engines, audio effects, and customizations.
 
 ---
 
@@ -19,7 +19,7 @@ Welcome to the **VoiceCraft** codebase guide. This document serves as a technica
 
 ## 🎙 Application Overview
 
-**VoiceCraft** is a modular, desktop-based Text-to-Speech (TTS) Studio built in Python. It provides a premium, responsive dark-themed dashboard using CustomTkinter, allowing users to synthesize high-quality speech from text and apply real-time DSP (Digital Signal Processing) effects. 
+**Adits Voice Studio** (formerly VoiceCraft TTS Studio) is a modular, desktop-based Text-to-Speech (TTS) Studio built in Python. It provides a premium, responsive dark-themed dashboard using CustomTkinter, allowing users to synthesize high-quality speech from text and apply real-time DSP (Digital Signal Processing) effects. 
 
 ### Key Highlights
 * **Multi-Engine Support**: Supports cloud-based APIs (Google Translate TTS, Microsoft Edge Neural) and local offline AI models (Kokoro-82M, MeloTTS, Piper TTS, and local system SAPI5 voices).
@@ -31,25 +31,25 @@ Welcome to the **VoiceCraft** codebase guide. This document serves as a technica
 
 ## 📁 File Dictionary
 
-Below is the directory structure mapping each component of the VoiceCraft application to its technical role:
+Below is the directory structure mapping each component of the Adits Voice Studio application to its technical role:
 
 | Path | File / Folder Type | Description |
 | :--- | :--- | :--- |
-| `tts_app.py` | Entry Point Script | The main application entry point. Initializes the CustomTkinter runtime and starts `VoiceCraftApp`. |
+| `tts_app.py` | Entry Point Script | The main application entry point. Initializes the CustomTkinter runtime and starts `AditsVoiceStudioApp`. |
 | `run.ps1` | Shell Script | PowerShell launcher that automatically checks for and triggers the application via the local virtual environment (`venv_311`). |
 | `requirements.txt` | Package Dependencies | Dependencies grouped per engine, plus GUI, playback and DSP libraries. Ends with a note on why `kokoro-onnx` must be installed separately with `--no-deps`. |
-| `build_exe.py` | Packaging Script | PyInstaller build of the public release. Bundles only the models the app reads, excludes gTTS/Edge and unused packages, prunes build-only files, writes license notices, then self-tests the frozen EXE. `--installer` also compiles `installer.iss`. Refuses to run from an interpreter that cannot import every engine library, and refuses to bundle truncated Kokoro weights. Outputs `dist/TTS_Studio/TTS_Studio.exe`. |
-| `installer.iss` | Inno Setup Script | Packages the `dist/TTS_Studio/` PyInstaller output into a distributable Windows installer (`VoiceCraft-Setup-<version>.exe`) with a GPL license page, Start Menu shortcuts, optional desktop icon, and an uninstaller. |
+| `build_exe.py` | Packaging Script | PyInstaller build of the public release. Bundles only the models the app reads, excludes gTTS/Edge and unused packages, prunes build-only files, writes license notices, then self-tests the frozen EXE. `--installer` also compiles `installer.iss`. Refuses to run from an interpreter that cannot import every engine library, and refuses to bundle truncated Kokoro weights. Outputs `dist/AditsVoiceStudio/AditsVoiceStudio.exe`. |
+| `installer.iss` | Inno Setup Script | Packages the `dist/AditsVoiceStudio/` PyInstaller output into a distributable Windows installer (`AditsVoiceStudio-Setup-<version>.exe`) with a GPL license page, Start Menu shortcuts, optional desktop icon, and an uninstaller. |
 | `LICENSE.txt`, `licenses/` | Legal | The app is GPL-3.0-or-later. `licenses/` holds the other license texts and `NOTICES_HEADER.txt`, the hand-written top of the generated `THIRD_PARTY_NOTICES.txt`. |
-| `assets/`, `tools/make_assets.py` | Branding | App master logo (`logo.png`), icon (`voicecraft.ico`) and splash image (`splash.png`), styled with the app accent color (`#6C63FF`). |
+| `assets/`, `tools/make_assets.py` | Branding | App master logo (`logo.png`), icon (`adits_voice_studio.ico`) and splash image (`splash.png`), styled with the app accent color (`#6C63FF`). |
 | **`core/`** | Directory | Shared module containing core configuration parameters and system utilities. |
 | `├── version.py` | Product Identity | Single source of truth for name, version, publisher and source URL. Bump the version here only. |
-| `├── paths.py` | File Locations | `bundle_dir()` (read-only app files), `user_dir()` (`%LOCALAPPDATA%\VoiceCraft`), `output_dir()` (`Documents\VoiceCraft`). Also routes logs to `%LOCALAPPDATA%\VoiceCraft\logs` in the frozen build. |
+| `├── paths.py` | File Locations | `bundle_dir()` (read-only app files), `user_dir()` (`%LOCALAPPDATA%\AditsVoiceStudio`), `output_dir()` (`Documents\AditsVoiceStudio`). Also routes logs to `%LOCALAPPDATA%\AditsVoiceStudio\logs` in the frozen build. On first start after the rebrand, `user_root()` renames an existing `%LOCALAPPDATA%\VoiceCraft` to the new name, so settings, favourites, models and caches carry over. Saved audio in `Documents\VoiceCraft` is left where it is. |
 | `├── audio_io.py` | Audio I/O | MP3 encode and non-WAV decode through soundfile's libsndfile, so no ffmpeg is needed. |
-| `├── selftest.py` | Self-test | `TTS_Studio.exe --selftest report.json` runs every offline engine headless and checks real output. |
+| `├── selftest.py` | Self-test | `AditsVoiceStudio.exe --selftest report.json` runs every offline engine headless and checks real output. |
 | `├── constants.py` | Configuration Module | Holds application-wide design tokens (colors, font configurations) and static lists of languages/voices. |
 | `├── model_cache.py` | Model Cache | Thread-safe, idle-expiring cache (`MODEL_CACHE`) for heavy TTS/ASR models. Reuses loaded instances between generations and evicts them after 5 minutes idle, returning CUDA memory to the OS. |
-| `├── temp_cleanup.py` | Housekeeping | Sweeps orphaned `tts_studio_*` temp directories left behind by a crash or force-quit. Called on startup. |
+| `├── temp_cleanup.py` | Housekeeping | Sweeps orphaned `adits_vs_*` (and pre-rebrand `tts_studio_*`) temp directories left behind by a crash or force-quit. Called on startup. |
 | `├── subtitles.py` | Transcription Module | Word-level subtitle generation wrapper using `faster-whisper`. Manages dynamic GPU/CPU loading and VRAM unloading. |
 | `└── voice_cloning/` | Clone Voice (app side) | Manages the voice-cloning runtime and its worker processes. Never imports torch. See [Clone Voice](#-clone-voice-rvc-and-seed-vc). |
 | `    ├── runtime.py` | Runtime Manager | Paths, the two runtime venvs, `install()` / `uninstall()`, `runtime.json` manifest, pinned upstream commits. |
@@ -73,12 +73,12 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `├── registry.py` | Effects Registry | Declares `EFFECTS_REGISTRY`, configuring how each voice effect is displayed, toggled, and called. Appends cloned voices at import. |
 | `└── cloned_voices.py` | Cloned Voice Effects | Turns each ready voice into a `clone:<slug>` registry entry and converts audio through the worker. |
 | **`ui/`** | Directory | GUI presentation layer. |
-| `├── app.py` | Core GUI Controller | The main window class `VoiceCraftApp`. Orchestrates the background thread worker, playback systems, and save actions. |
+| `├── app.py` | Core GUI Controller | The main window class `AditsVoiceStudioApp`. Orchestrates the background thread worker, playback systems, and save actions. |
 | `├── theme.py` | UI Factory | Helper functions for creating CustomTkinter standard panels, dropdowns, sliders, and switches. `SmoothScrollableFrame` (the right column) eases wheel scrolling: CTk's own handler moves 20 px and redraws on every wheel event, and with about 900 widgets each redraw takes 15 to 20 ms, so fast spins stuttered. |
 | `└── panels/` | Directory | Custom panel sub-widgets. |
 | `    ├── text_panel.py` | GUI Widget | Renders the text area and updates the live character count. |
 | `    ├── engine_panel.py` | GUI Widget | Engine dropdown, GPU toggle, and dynamically swapped configuration screens for each engine. |
-| `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry, in three sub-sections: Favourites, Cloned Voices (with the ✏️ button) and Effects. The ♡ on each card adds a mirror card to Favourites that shares the original's switch variable, so both always show the same state. Favourite keys are saved in `%LOCALAPPDATA%\VoiceCraft\settings\favourites.json`; a deleted cloned voice is dropped from it. |
+| `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry, in three sub-sections: Favourites, Cloned Voices (with the ✏️ button) and Effects. The ♡ on each card adds a mirror card to Favourites that shares the original's switch variable, so both always show the same state. Favourite keys are saved in `%LOCALAPPDATA%\AditsVoiceStudio\settings\favourites.json`; a deleted cloned voice is dropped from it. |
 | `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
 | `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
 | `    ├── clone_voice_dialog.py` | GUI Widget | Rename / delete window opened by the ✏️ button in the Cloned Voices header. |
@@ -95,7 +95,7 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 
 ## 🏗 System Architecture
 
-VoiceCraft utilizes a decoupled, event-driven design. The user interface does not run synthesis operations directly. Instead, generation is offloaded to a worker thread that manages the synthesis and audio processing pipeline before reporting back to the UI.
+Adits Voice Studio utilizes a decoupled, event-driven design. The user interface does not run synthesis operations directly. Instead, generation is offloaded to a worker thread that manages the synthesis and audio processing pipeline before reporting back to the UI.
 
 ### 1. Data Flow Diagram
 
@@ -285,7 +285,7 @@ The app will dynamically render the toggle switch, wire the `BooleanVar` state, 
 
 ## 🎧 Audio Customization Deep-Dive
 
-VoiceCraft implements a post-processing pipeline that runs sequentially in the following order:
+Adits Voice Studio implements a post-processing pipeline that runs sequentially in the following order:
 
 1. **Silence Skipping** (if enabled; crops silent periods using `pydub`)
 2. **Speed Adjustment** (if speed is non-default; resamples or uses phase vocoder)
@@ -493,16 +493,16 @@ graph LR
   training stops every convert worker, and conversions raise `VCBusy` while a
   voice trains.
 * Workers exit after 5 minutes idle, when the app closes their stdin, or on
-  `shutdown`. `TTSStudioApp.destroy()` calls `shutdown_client()`.
-* `TTSStudioApp._engine_lock` serializes every `engine.synthesize()` call,
+  `shutdown`. `AditsVoiceStudioApp.destroy()` calls `shutdown_client()`.
+* `AditsVoiceStudioApp._engine_lock` serializes every `engine.synthesize()` call,
   because the Clone Voice tools synthesize too (base sample, preview).
 
 ### Where things live
 
 | What | From source | Installed EXE |
 | :--- | :--- | :--- |
-| Runtime root | `vc_runtime_data/` in the repo | `%LOCALAPPDATA%\VoiceCraft\vc_runtime` |
-| Override | `%LOCALAPPDATA%\VoiceCraft\settings\clone_voice.json` with `{"runtime_root": "E:\\..."}` | same |
+| Runtime root | `vc_runtime_data/` in the repo | `%LOCALAPPDATA%\AditsVoiceStudio\vc_runtime` |
+| Override | `%LOCALAPPDATA%\AditsVoiceStudio\settings\clone_voice.json` with `{"runtime_root": "E:\\..."}` | same |
 | Manifest | `<root>\runtime.json` (one verified entry per engine) | same |
 | Logs | `<root>\logs\install.log`, `worker-rvc.log`, `worker-rvc-train.log`, `worker-seedvc.log` | same |
 | Voices | `<root>\voices\<slug>\` | same |
@@ -616,7 +616,7 @@ comes from the measured epoch times instead.
   the widget's path name in `self._w`, so the method replaces it and drawing
   fails with "'str' object is not callable".
 * `CustomizationPanel.cleanup()` also runs when the ambiance choice changes, so
-  clone cleanup is called from `TTSStudioApp.destroy()`, not from there.
+  clone cleanup is called from `AditsVoiceStudioApp.destroy()`, not from there.
 
 ### Troubleshooting
 
@@ -662,7 +662,7 @@ To launch the application from source code:
    ```
 
 ### Compiling to Portable EXE
-You can package VoiceCraft into a standalone Windows directory:
+You can package Adits Voice Studio into a standalone Windows directory:
 1. Run [build_exe.py](file:///e:/Develop/Antigravity_testing/tts_app%20modular/build_exe.py) **with the venv interpreter**:
    ```powershell
    .\venv_311\Scripts\python.exe build_exe.py
@@ -678,8 +678,8 @@ You can package VoiceCraft into a standalone Windows directory:
    * prunes build-only files (`torch/lib/*.lib`, headers, C sources, pygame tests);
    * writes `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` and `licenses/` into the app folder;
    * bundles `vc_runtime/` (worker scripts and pinned requirements) as data, but no cloning libraries;
-   * runs `TTS_Studio.exe --selftest` and stops if any offline engine produces no audio.
-3. Once completed, the distribution is saved in the `./dist/TTS_Studio/` folder (dominated by the CUDA build of PyTorch). Run `TTS_Studio.exe` to launch the portable app.
+   * runs `AditsVoiceStudio.exe --selftest` and stops if any offline engine produces no audio.
+3. Once completed, the distribution is saved in the `./dist/AditsVoiceStudio/` folder (dominated by the CUDA build of PyTorch). Run `AditsVoiceStudio.exe` to launch the portable app.
 
 ### Building a Windows Installer (Setup.exe)
 For end users, a proper installer is preferable to distributing the raw portable folder. [installer.iss](file:///e:/Develop/Antigravity_testing/tts_app%20modular/installer.iss) is an [Inno Setup](https://jrsoftware.org/isinfo.php) script that wraps the PyInstaller output into a single `Setup.exe`.
@@ -690,16 +690,16 @@ For end users, a proper installer is preferable to distributing the raw portable
    ```powershell
    .\venv_311\Scripts\python.exe build_exe.py --installer
    ```
-   Or compile only the installer from an existing `dist/TTS_Studio/`:
+   Or compile only the installer from an existing `dist/AditsVoiceStudio/`:
    `& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer.iss`
-4. The resulting installer is written to `installer_output/VoiceCraft-Setup-<version>.exe` (gitignored, same as `dist/` and `build/`). Compression takes a long time (lzma2/ultra64 over several GB).
+4. The resulting installer is written to `installer_output/AditsVoiceStudio-Setup-<version>.exe` (gitignored, same as `dist/` and `build/`). Compression takes a long time (lzma2/ultra64 over several GB).
 
 The installer:
-* Installs to `%LocalAppData%\Programs\VoiceCraft` and does **not** require admin rights (`PrivilegesRequired=lowest`).
+* Installs to `%LocalAppData%\Programs\AditsVoiceStudio` (an upgrade keeps the existing folder, including a pre-rebrand `VoiceCraft` one, and removes the old `TTS_Studio.exe` and its shortcuts) and does **not** require admin rights (`PrivilegesRequired=lowest`).
 * Shows the GPL-3.0 license page, and adds Start Menu shortcuts for the app, the third-party notices and the uninstaller.
 * Deletes the old `{app}\_internal` on upgrade, since torch loads every DLL in `torch\lib` and stale ones would be loaded too.
 * Will not overwrite a running copy (`AppMutex`, created by `tts_app.py`).
-* On uninstall, asks before deleting `%LocalAppData%\VoiceCraft` (downloaded models, caches, logs). Saved audio in `Documents\VoiceCraft` is never touched.
+* On uninstall, asks before deleting `%LocalAppData%\AditsVoiceStudio` (downloaded models, caches, logs). Saved audio in `Documents\AditsVoiceStudio` is never touched.
 * A single Setup.exe holds up to about 4.2 GB compressed. Past that, enable `DiskSpanning` (see the note in `installer.iss`).
 * Unsigned by default, so Windows SmartScreen warns on first run. The signing hook is described at the top of `installer.iss`.
 
@@ -708,10 +708,10 @@ The install folder is treated as read-only. See [paths.py](file:///e:/Develop/An
 
 | What | Location |
 | :--- | :--- |
-| Saved audio and SRT (default) | `Documents\VoiceCraft` |
-| Log file | `%LOCALAPPDATA%\VoiceCraft\logs\voicecraft.log` (previous run: `voicecraft.prev.log`) |
-| Hugging Face downloads (MeloTTS, Kokoro PyTorch path) | `%LOCALAPPDATA%\VoiceCraft\cache\huggingface` |
-| Re-downloaded Kokoro weights, NLTK data | `%LOCALAPPDATA%\VoiceCraft\models`, `...\nltk_data` |
+| Saved audio and SRT (default) | `Documents\AditsVoiceStudio` |
+| Log file | `%LOCALAPPDATA%\AditsVoiceStudio\logs\adits_voice_studio.log` (previous run: `adits_voice_studio.prev.log`) |
+| Hugging Face downloads (MeloTTS, Kokoro PyTorch path) | `%LOCALAPPDATA%\AditsVoiceStudio\cache\huggingface` |
+| Re-downloaded Kokoro weights, NLTK data | `%LOCALAPPDATA%\AditsVoiceStudio\models`, `...\nltk_data` |
 
 Running from source keeps the old layout (`output/`, repo-root weights, normal HF cache).
 
@@ -748,7 +748,7 @@ When bundling with PyInstaller, the following must be collected via `--collect-a
 `cn2an`, `jieba`, `pypinyin`, `librosa`, `cached_path`, `gruut`, `gruut_lang_*`,
 and `nltk_data` (corpora & taggers). If any package or its non-Python data files
 are omitted, MeloTTS fails on first use. Errors are written to
-`melo_startup_error.log` in the logs folder (`%LOCALAPPDATA%\VoiceCraft\logs`
+`melo_startup_error.log` in the logs folder (`%LOCALAPPDATA%\AditsVoiceStudio\logs`
 when frozen, the repo root from source). The frozen self-test imports
 `melo.api` and fails the build on a missing module.
 
@@ -794,18 +794,18 @@ To check a file by hand:
 
 ### Non-ASCII install paths (espeak-ng)
 
-The default install is `C:\Users\<name>\AppData\Local\Programs\VoiceCraft`, so a
+The default install is `C:\Users\<name>\AppData\Local\Programs\AditsVoiceStudio`, so a
 Windows user name with an accent or non-Latin letters puts the whole bundle on a
 non-ASCII path. espeak-ng (used by Kokoro ONNX and Piper) then fails with
 `language "en-us" is not supported by the espeak backend`. The 8.3 short path
 does **not** help; it fails the same way.
 
 `core.paths.ascii_path()` copies the espeak DLL and data (about 20 MB per
-folder) once into `%ProgramData%\VoiceCraft-ascii-<version>-<hash>` (fallback
+folder) once into `%ProgramData%\AditsVoiceStudio-ascii-<version>-<hash>` (fallback
 `C:\Users\Public`), and both engines are handed that copy. The uninstaller
 removes these folders. Test any espeak-related change by installing into a
-folder such as `%LOCALAPPDATA%\Programs\VoiceCraft_tëst` and running
-`TTS_Studio.exe --selftest report.json` from there, because the build's own
+folder such as `%LOCALAPPDATA%\Programs\AditsVoiceStudio_tëst` and running
+`AditsVoiceStudio.exe --selftest report.json` from there, because the build's own
 self-test runs from the ASCII repo path and cannot catch this.
 
 Not covered: the Kokoro PyTorch fallback (misaki/phonemizer) and MeloTTS
@@ -829,7 +829,7 @@ non-English languages have not been tested from a non-ASCII path.
 To audit a finished build, the PyInstaller TOC records absolute source paths:
 
 ```powershell
-Select-String -Path build\TTS_Studio\COLLECT-00.toc -Pattern "site-packages" | Select-Object -First 3
+Select-String -Path build\AditsVoiceStudio\COLLECT-00.toc -Pattern "site-packages" | Select-Object -First 3
 ```
 
 If those point anywhere other than `venv_311`, the EXE was built by the wrong

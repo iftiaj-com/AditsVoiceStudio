@@ -1,1 +1,1 @@
-# VoiceCraft UI package
+# Adits Voice Studio UI package

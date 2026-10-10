@@ -761,7 +761,7 @@ class CloneVoiceGroup:
         if st["frozen_unsupported"]:
             self._set_status("Not available in this build", COLORS["text_muted"])
             self._setup_text.configure(text="Voice cloning setup is available when running "
-                                            "TTS Studio from source. It is not bundled with the installer yet.")
+                                            "Adits Voice Studio from source. It is not bundled with the installer yet.")
             self._install_btn.grid_remove()
         elif not installed:
             self._set_status("Not installed", COLORS["text_muted"])
@@ -1253,7 +1253,7 @@ class CloneVoiceGroup:
         return np.array(seg.get_array_of_samples(), dtype=np.float32) / peak, seg.frame_rate
 
     def _new_tmp(self):
-        d = tempfile.mkdtemp(prefix="tts_studio_clone_")
+        d = tempfile.mkdtemp(prefix="adits_vs_clone_")
         self._tmp_dirs.append(d)
         return d
 

@@ -1,7 +1,7 @@
 """
 tools/make_assets.py
 ─────────────────────
-Regenerates assets/voicecraft.ico (EXE, shortcuts, installer) and
+Regenerates assets/adits_voice_studio.ico (EXE, shortcuts, installer) and
 assets/splash.png (PyInstaller splash shown during the slow first start)
 from assets/logo.png and the app's design tokens.
 
@@ -71,7 +71,7 @@ def make_splash(splash_path):
     mark = logo.resize((mark_size, mark_size), Image.Resampling.LANCZOS)
     img.paste(mark, (36, 68), mark)
 
-    d.text((176, 76), "Adits Voice Studio", font=_font(28, bold=True), fill=_hex(COLORS["text_primary"]))
+    d.text((176, 76), APP_TITLE, font=_font(28, bold=True), fill=_hex(COLORS["text_primary"]))
     d.text((177, 122), "Audio FX & Voice Clone", font=_font(14, bold=True), fill=accent)
     d.text((177, 150), f"Version {__version__}", font=_font(13), fill=_hex(COLORS["text_muted"]))
 
@@ -83,6 +83,6 @@ def make_splash(splash_path):
 
 if __name__ == "__main__":
     os.makedirs(ASSETS, exist_ok=True)
-    make_ico(os.path.join(ASSETS, "voicecraft.ico"))
+    make_ico(os.path.join(ASSETS, "adits_voice_studio.ico"))
     make_splash(os.path.join(ASSETS, "splash.png"))
     print("wrote", os.listdir(ASSETS))

@@ -49,7 +49,7 @@ class TimelineDialog(ctk.CTkToplevel):
         self.sel = [start or 0.0, end]
         self.view = [0.0, 1.0]
         self._drag = None
-        self._tmp = tempfile.mkdtemp(prefix="tts_studio_timeline_")
+        self._tmp = tempfile.mkdtemp(prefix="adits_vs_timeline_")
         self._sound = None
         self._play_t0 = None
         self._play_from = 0.0

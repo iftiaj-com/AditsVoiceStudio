@@ -8,8 +8,8 @@ install is not writable by normal users, and anything written next to the
 EXE is mixed with 30k bundled files and left behind by the uninstaller. So:
 
   bundle_dir()  read-only app files (sys._MEIPASS when frozen, repo in dev)
-  user_dir(x)   %LOCALAPPDATA%\\VoiceCraft\\x  for logs, caches, downloads
-  output_dir()  Documents\\VoiceCraft  default folder for saved audio
+  user_dir(x)   %LOCALAPPDATA%\\AditsVoiceStudio\\x  for logs, caches, downloads
+  output_dir()  Documents\\AditsVoiceStudio  default folder for saved audio
 
 Running from source keeps the old layout (repo/output, repo-root weights),
 so dev behaviour is unchanged.
@@ -20,7 +20,7 @@ import sys
 import logging
 from pathlib import Path
 
-from core.version import APP_NAME
+from core.version import APP_NAME, LEGACY_APP_NAME
 
 FROZEN = getattr(sys, "frozen", False)
 
@@ -34,8 +34,25 @@ def bundle_dir() -> Path:
 def user_root() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     root = Path(base) / APP_NAME
+    if not root.exists():
+        _adopt_legacy_root(Path(base) / LEGACY_APP_NAME, root)
     root.mkdir(parents=True, exist_ok=True)
     return root
+
+
+def _adopt_legacy_root(old: Path, new: Path) -> None:
+    """Move the data folder of the pre-rebrand app (VoiceCraft) to the new name.
+
+    Settings, favourites, downloaded models and caches come along, so the
+    rebrand loses nothing. Runs once: afterwards the new folder exists. If the
+    move fails (the old app is still running), the app starts with a fresh
+    folder and the old one stays where it is.
+    """
+    try:
+        if old.is_dir():
+            os.rename(old, new)
+    except OSError as e:
+        print(f"Could not move {old} to {new}: {e}")
 
 
 def user_dir(name: str) -> Path:
@@ -146,7 +163,7 @@ def configure_runtime():
         pass   # unwritable profile: leave the library default
 
     try:
-        log_path = logs_dir() / "voicecraft.log"
+        log_path = logs_dir() / "adits_voice_studio.log"
         # Keep one previous session for diagnosis, drop anything older.
         if log_path.exists() and log_path.stat().st_size > 0:
             os.replace(log_path, log_path.with_suffix(".prev.log"))

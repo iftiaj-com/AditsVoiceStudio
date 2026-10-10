@@ -24,8 +24,8 @@ import numpy as np
 
 CLONE_GROUP = "clone"
 KEY_PREFIX = "clone:"
-# The "tts_studio_" prefix lets core/temp_cleanup.py sweep these after a crash.
-TEMP_PREFIX = "tts_studio_vc_"
+# The "adits_vs_" prefix lets core/temp_cleanup.py sweep these after a crash.
+TEMP_PREFIX = "adits_vs_vc_"
 
 
 def is_clone_entry(entry) -> bool:

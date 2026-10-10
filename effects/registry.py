@@ -1,7 +1,7 @@
 """
 effects/registry.py
 ────────────────────
-Master registry of every voice effect available in VoiceCraft.
+Master registry of every voice effect available in Adits Voice Studio.
 
 To add a new effect:
   1. Add the DSP method to effects/audio_effects.py.

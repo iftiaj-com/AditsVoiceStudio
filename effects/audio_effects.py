@@ -1,7 +1,7 @@
 """
 effects/audio_effects.py
 ────────────────────────
-All numpy-based audio DSP effects for VoiceCraft.
+All numpy-based audio DSP effects for Adits Voice Studio.
 
 To add a new effect:
   1. Add a @staticmethod method below.

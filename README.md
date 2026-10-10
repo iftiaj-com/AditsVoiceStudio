@@ -1,4 +1,4 @@
-# VoiceCraft TTS Studio
+# Adits Voice Studio
 
 A desktop text-to-speech studio for Windows. Type text, pick an engine and a
 voice, add effects, and save the result as WAV or MP3 with optional subtitles.
@@ -74,7 +74,7 @@ Cancel stops any running install, analysis, training or preview.
 ## Building the Windows app
 
 ```powershell
-.\venv_311\Scripts\python.exe build_exe.py              # app folder in dist\TTS_Studio
+.\venv_311\Scripts\python.exe build_exe.py              # app folder in dist\AditsVoiceStudio
 .\venv_311\Scripts\python.exe build_exe.py --installer  # also the Setup.exe (Inno Setup 6)
 ```
 
@@ -86,9 +86,9 @@ available yet; it works when running from source.
 
 | What | Running from source | Installed app |
 | :--- | :--- | :--- |
-| Saved audio and subtitles | `output\` | `Documents\VoiceCraft` |
-| Voice cloning runtime, cloned voices, recordings | `vc_runtime_data\` | `%LOCALAPPDATA%\VoiceCraft\vc_runtime` |
-| Logs | repo folder | `%LOCALAPPDATA%\VoiceCraft\logs` |
+| Saved audio and subtitles | `output\` | `Documents\AditsVoiceStudio` |
+| Voice cloning runtime, cloned voices, recordings | `vc_runtime_data\` | `%LOCALAPPDATA%\AditsVoiceStudio\vc_runtime` |
+| Logs | repo folder | `%LOCALAPPDATA%\AditsVoiceStudio\logs` |
 
 ## License
 

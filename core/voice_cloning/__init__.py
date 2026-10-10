@@ -1,7 +1,7 @@
 """
 core/voice_cloning
 ───────────────────
-Voice cloning (RVC via Applio, zero-shot via Seed-VC) for TTS Studio.
+Voice cloning (RVC via Applio, zero-shot via Seed-VC) for Adits Voice Studio.
 
 The heavy work runs in separate processes inside their own Python venvs
 (see runtime.py and vc_runtime/). This package only manages those

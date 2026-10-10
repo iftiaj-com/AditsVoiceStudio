@@ -1,4 +1,4 @@
-# VoiceCraft dependencies
+# Adits Voice Studio dependencies
 # Install order matters for Kokoro; see the note at the bottom.
 
 # ── GUI, playback, DSP ──────────────────────────────────────────

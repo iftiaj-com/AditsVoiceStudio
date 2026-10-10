@@ -312,7 +312,7 @@ def rate_unit(lang):
 def build_bank(app, eng_settings, cands, progress=None, check_cancel=None):
     """Synthesize and measure every candidate missing from the bank. Resumable.
 
-    app: the TTSStudioApp (engines, _engine_kwargs, _engine_lock).
+    app: the AditsVoiceStudioApp (engines, _engine_kwargs, _engine_lock).
     eng_settings: EnginePanel.get_settings() snapshot used as defaults.
     progress(fraction, message).
     Returns the bank.

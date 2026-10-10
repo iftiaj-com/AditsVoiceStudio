@@ -9,7 +9,7 @@ from engines.base import BaseTTSEngine
 from core import paths
 from core.model_cache import MODEL_CACHE
 
-logger = logging.getLogger("VoiceCraft")
+logger = logging.getLogger("AditsVoiceStudio")
 
 # In frozen PyInstaller app, ensure NLTK can locate bundled nltk_data inside _internal
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):

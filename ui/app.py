@@ -1,7 +1,7 @@
 """
 ui/app.py
 ──────────
-TTSStudioApp — the main application window.
+AditsVoiceStudioApp — the main application window.
 Assembles all panels and owns the generation / playback pipeline.
 """
 
@@ -59,7 +59,7 @@ except ImportError:
     _LIBROSA = False
 
 
-class TTSStudioApp(ctk.CTk):
+class AditsVoiceStudioApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
@@ -72,7 +72,7 @@ class TTSStudioApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         # Window & taskbar icon
-        ico_file = paths.bundle_dir() / "assets" / "voicecraft.ico"
+        ico_file = paths.bundle_dir() / "assets" / "adits_voice_studio.ico"
         if ico_file.exists():
             try:
                 self.iconbitmap(default=str(ico_file))
@@ -411,7 +411,7 @@ class TTSStudioApp(ctk.CTk):
             if check_cancel():
                 return
 
-            tmp_dir = tempfile.mkdtemp(prefix="tts_studio_")
+            tmp_dir = tempfile.mkdtemp(prefix="adits_vs_")
             self._tmp_dirs.add(tmp_dir)
             progress(0.05)
 
@@ -748,7 +748,7 @@ class TTSStudioApp(ctk.CTk):
         # New filename convention: First_three_word_of_input_timestamp
         text = self._text_panel.get_text().strip()
         words = re.findall(r'\w+', text)
-        prefix = "_".join(words[:3]) if words else "tts_studio"
+        prefix = "_".join(words[:3]) if words else "adits_voice_studio"
         ts = time.strftime('%Y%m%d_%H%M%S')
         initial_name = f"{prefix}_{ts}{default_ext}"
 
@@ -870,7 +870,7 @@ class TTSStudioApp(ctk.CTk):
             if not messagebox.askyesno(
                     "Voice training in progress",
                     "A cloned voice is still training.\n\n"
-                    "Closing TTS Studio stops the training and discards it. Close anyway?",
+                    "Closing Adits Voice Studio stops the training and discards it. Close anyway?",
                     icon="warning", parent=self):
                 return
         self._stop_event.set()

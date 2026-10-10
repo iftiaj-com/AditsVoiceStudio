@@ -1,1 +1,1 @@
-# VoiceCraft effects package
+# Adits Voice Studio effects package

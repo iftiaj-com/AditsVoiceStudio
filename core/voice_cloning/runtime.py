@@ -513,7 +513,7 @@ def install(engines=("rvc", "seedvc"), progress_cb=None, log_cb=None, cancel_eve
     """
     if frozen_unsupported():
         raise InstallError("Voice cloning setup is not available in the installed build yet.",
-                           hint="Run TTS Studio from source to install it.")
+                           hint="Run Adits Voice Studio from source to install it.")
     progress = progress_cb or (lambda f, m: None)
     root = runtime_root()
     root.mkdir(parents=True, exist_ok=True)

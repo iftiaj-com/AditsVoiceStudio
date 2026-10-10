@@ -49,7 +49,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self.transient(app)
         self._cancel = threading.Event()
         self._busy = False
-        self._tmp = tempfile.mkdtemp(prefix="tts_studio_match_")
+        self._tmp = tempfile.mkdtemp(prefix="adits_vs_match_")
         self._clip = None
         self._ranked = []
         self._sound = None
