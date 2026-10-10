@@ -34,14 +34,17 @@ class EnginePanel:
             ).pack(anchor="w", padx=16, pady=(14, 10))
         self._system_voices = system_voices
 
-        # ── Engine selector + GPU toggle (stacked vertically to prevent wide layouts) ──
+        # ── Engine selector, GPU toggle on the right edge of the same row ──
+        # The dropdown stretches between the label and the toggle, so the row
+        # also fits the narrowest window (500 px column).
         engine_row = ctk.CTkFrame(self._frame, fg_color="transparent")
-        engine_row.pack(fill="x", padx=16, pady=(0, 6))
+        engine_row.pack(fill="x", padx=16, pady=(0, 10))
+        engine_row.columnconfigure(1, weight=1)
 
         engine_names = [e.name for e in available_engines] or ["No TTS engines available"]
 
         ctk.CTkLabel(engine_row, text="Engine", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).pack(side="left", padx=(0, 10))
+                     text_color=COLORS["text_secondary"]).grid(row=0, column=0, sticky="w", padx=(0, 10))
 
         # Default to Kokoro if present
         default_val = engine_names[0]
@@ -58,24 +61,21 @@ class EnginePanel:
             button_hover_color=COLORS["accent_secondary"],
             dropdown_fg_color=COLORS["bg_card"],
             dropdown_hover_color=COLORS["accent_primary"],
-            corner_radius=8, width=280,
+            corner_radius=8, width=160,
             command=self._on_engine_change,
         )
-        self._engine_menu.pack(side="left")
-
-        gpu_row = ctk.CTkFrame(self._frame, fg_color="transparent")
-        gpu_row.pack(fill="x", padx=16, pady=(0, 10))
+        self._engine_menu.grid(row=0, column=1, sticky="ew")
 
         self.gpu_var = ctk.BooleanVar(value=torch.cuda.is_available())
         ctk.CTkSwitch(
-            gpu_row, text="GPU Acceleration (PyTorch)", variable=self.gpu_var,
+            engine_row, text="GPU Acceleration (PyTorch)", variable=self.gpu_var,
             font=FONTS["body_small"], text_color=COLORS["text_secondary"],
             onvalue=True, offvalue=False,
             button_color=COLORS["accent_primary"],
             button_hover_color=COLORS["accent_secondary"],
             progress_color=COLORS["success"],
             fg_color=COLORS["switch_off"],
-        ).pack(side="left", padx=(54, 0))
+        ).grid(row=0, column=2, sticky="e", padx=(16, 0))
 
         # ── Per-engine sub-frames ──────────────────────────────────
         self._sub_frames: dict[str, ctk.CTkFrame] = {}
@@ -309,6 +309,140 @@ class EnginePanel:
             if keyword in selection and key in self._sub_frames:
                 self._sub_frames[key].pack(fill="x", padx=16, pady=(0, 12))
                 break
+
+    # ── Voice selection (used by cloned voices) ────────────────────
+    # A cloned voice sounds best when converted from the engine voice it was
+    # made with, so each voice stores the selection below and switching the
+    # voice on restores it. Values are the dropdown display strings.
+
+    _KIND_BY_KEYWORD = {"gTTS": "gtts", "Edge": "edge", "Kokoro": "kokoro",
+                        "Piper": "piper", "Melo": "melo", "pyttsx3": "pyttsx3"}
+
+    @classmethod
+    def engine_kind(cls, engine_name):
+        for keyword, kind in cls._KIND_BY_KEYWORD.items():
+            if keyword in (engine_name or ""):
+                return kind
+        return None
+
+    @classmethod
+    def describe_selection(cls, sel) -> str:
+        """'Kokoro-82M · am_onyx · 1.2x' for labels; '' when sel is empty."""
+        if not sel or not sel.get("engine"):
+            return ""
+        parts = [sel["engine"].split(" (")[0]]
+        if sel.get("voice"):
+            parts.append(str(sel["voice"]))
+        speed = sel.get("speed")
+        if speed is not None:
+            kind = sel.get("kind") or cls.engine_kind(sel["engine"])
+            parts.append(f"{int(speed):+d}%" if kind == "edge" else
+                         f"{int(speed)} WPM" if kind == "pyttsx3" else f"{float(speed):.1f}x")
+        return " · ".join(parts)
+
+    def get_voice_selection(self) -> dict:
+        """The engine and voice currently picked, as dropdown values."""
+        name = self.engine_var.get()
+        kind = self.engine_kind(name)
+        sel = {"engine": name, "kind": kind}
+        if kind == "kokoro":
+            sel.update(lang=self.kokoro_lang_var.get(), voice=self.kokoro_voice_var.get())
+        elif kind == "edge":
+            sel["voice"] = self.edge_voice_var.get()
+        elif kind == "piper":
+            sel["voice"] = self.piper_voice_var.get()
+        elif kind == "melo":
+            sel["voice"] = self.melo_voice_var.get()
+        elif kind == "pyttsx3":
+            sel["voice"] = self.pyttsx3_voice_var.get()
+        elif kind == "gtts":
+            sel["voice"] = self.gtts_lang_var.get()
+        speed = self._speed_var(kind)
+        if speed is not None:
+            sel["speed"] = round(float(speed.get()), 2)
+        return sel
+
+    def _speed_var(self, kind):
+        """The speed control of an engine kind (None for Piper and gTTS)."""
+        return {"kokoro": self.kokoro_speed_var, "melo": self.melo_speed_var,
+                "edge": self.edge_rate_var, "pyttsx3": self.rate_var}.get(kind)
+
+    def _apply_speed(self, kind, value):
+        """Set an engine's speed control and its value label. Out-of-range values are clamped."""
+        var = self._speed_var(kind)
+        if var is None or value is None:
+            return
+        lo, hi, label, fmt = {
+            "kokoro":  (0.5, 2.0, self._kokoro_speed_lbl, lambda v: f"{v:.1f}x"),
+            "melo":    (0.5, 2.0, self._melo_speed_lbl, lambda v: f"{v:.1f}x"),
+            "edge":    (-50, 50, self._edge_rate_lbl, lambda v: f"{int(v):+d}%"),
+            "pyttsx3": (50, 350, self._rate_lbl, lambda v: f"{int(v)} WPM"),
+        }[kind]
+        v = max(lo, min(hi, float(value)))
+        var.set(int(round(v)) if isinstance(var, ctk.IntVar) else v)
+        label.configure(text=fmt(v))
+
+    def _voice_options(self, kind) -> dict:
+        """{dropdown value: underlying value} for an engine kind."""
+        if kind == "edge":
+            return dict(EDGE_VOICES)
+        if kind == "piper":
+            return dict(PIPER_VOICES)
+        if kind == "melo":
+            return {k: v.get("speaker") for k, v in MELO_VOICES.items()}
+        if kind == "pyttsx3":
+            return {n: vid for n, vid in self._system_voices} or {"Default": ""}
+        if kind == "gtts":
+            return dict(GTTS_LANGUAGES)
+        return {}
+
+    def apply_voice_selection(self, sel):
+        """Select sel's engine and voice. Returns None on success, else why not.
+
+        Nothing changes unless the whole selection can be applied. A voice
+        may be given as the dropdown value or the underlying value (older
+        voices stored e.g. a Piper model key or a Melo speaker id).
+        """
+        if not sel or not sel.get("engine"):
+            return "no base voice is recorded"
+        engines = list(self._engine_menu.cget("values"))
+        kind = sel.get("kind") or self.engine_kind(sel["engine"])
+        name = sel["engine"] if sel["engine"] in engines else next(
+            (e for e in engines if kind and self.engine_kind(e) == kind), None)
+        if name is None:
+            return f"{sel['engine'].split(' (')[0]} is not available"
+        voice = sel.get("voice")
+
+        if kind == "kokoro":
+            lang = sel.get("lang")
+            if lang not in KOKORO_LANGS or voice not in KOKORO_VOICES[KOKORO_LANGS[lang]]:
+                lang = next((ln for ln, code in KOKORO_LANGS.items()
+                             if voice in KOKORO_VOICES.get(code, {})), None)
+            if lang is None:
+                return f"Kokoro voice '{voice}' is not available"
+            self.engine_var.set(name)
+            self._on_engine_change(name)
+            self.kokoro_lang_var.set(lang)
+            self._update_kokoro_voices(lang)
+            self.kokoro_voice_var.set(voice)
+            self._apply_speed(kind, sel.get("speed"))
+            return None
+
+        target = None
+        if voice is not None:
+            options = self._voice_options(kind)
+            target = voice if voice in options else next(
+                (k for k, v in options.items() if v == voice), None)
+            if target is None:
+                return f"voice '{voice}' is not available in {name.split(' (')[0]}"
+        self.engine_var.set(name)
+        self._on_engine_change(name)
+        var = {"edge": self.edge_voice_var, "piper": self.piper_voice_var, "melo": self.melo_voice_var,
+               "pyttsx3": self.pyttsx3_voice_var, "gtts": self.gtts_lang_var}.get(kind)
+        if var is not None and target is not None:
+            var.set(target)
+        self._apply_speed(kind, sel.get("speed"))   # older voices have none: speed is left alone
+        return None
 
     # ── Settings accessor ──────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 ; installer.iss
-; Inno Setup 6 script that packages the PyInstaller build (dist\TTS_Studio\)
+; Inno Setup 6 script that packages the PyInstaller build (dist\AditsVoiceStudio\)
 ; into a single Windows Setup.exe.
 ;
 ; Build both in one step (version, publisher and URL come from core\version.py):
@@ -20,22 +20,32 @@
   #define MyAppVersion "1.0.0"
 #endif
 #ifndef MyAppPublisher
-  #define MyAppPublisher "VoiceCraft"
+  #define MyAppPublisher "iftiaj.com"
 #endif
 #ifndef MyAppURL
-  #define MyAppURL "https://github.com/iftiaj-com/tts_studio"
+  #define MyAppURL "https://github.com/iftiaj-com/AditsVoiceStudio"
 #endif
 #ifndef MyAppTitle
-  #define MyAppTitle "VoiceCraft TTS Studio"
+  #define MyAppTitle "Adits Voice Studio"
 #endif
-#define MyAppName "VoiceCraft"
-#define MyAppExeName "TTS_Studio.exe"
-#define MyAppSourceDir "dist\TTS_Studio"
+#ifndef MyAppName
+  #define MyAppName "AditsVoiceStudio"
+#endif
+#ifndef MyAppExeBase
+  #define MyAppExeBase "AditsVoiceStudio"
+#endif
+#define MyAppExeName MyAppExeBase + ".exe"
+#define MyAppSourceDir "dist\" + MyAppExeBase
 ; Must match _MUTEX_NAME in tts_app.py.
-#define MyAppMutex "VoiceCraftSingleInstance"
+#define MyAppMutex "AditsVoiceStudioSingleInstance"
+; Before the rebrand (VoiceCraft TTS Studio). An upgrade over such an install
+; removes the old EXE and shortcuts; the app moves the old data folder itself.
+#define LegacyExeName "TTS_Studio.exe"
+#define LegacyTitle "VoiceCraft TTS Studio"
 
 [Setup]
-; Never change AppId: upgrades find the existing install through it.
+; Never change AppId: upgrades find the existing install through it (it
+; also carried the VoiceCraft installs over to the new name).
 AppId={{B6E3F5C2-6E4B-4B7B-9C1A-2F3A6F8C5D91}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -50,14 +60,15 @@ VersionInfoDescription={#MyAppTitle} Setup
 VersionInfoProductName={#MyAppTitle}
 VersionInfoProductVersion={#MyAppVersion}
 
-; Per-user install to %LocalAppData%\Programs\VoiceCraft: no admin prompt.
+; Per-user install to %LocalAppData%\Programs\AditsVoiceStudio: no admin prompt.
+; An upgrade keeps the folder of the existing install.
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 
 LicenseFile=LICENSE.txt
-SetupIconFile=assets\voicecraft.ico
+SetupIconFile=assets\adits_voice_studio.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppTitle}
 WizardStyle=modern
@@ -95,9 +106,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [InstallDelete]
 ; An upgrade must not keep files the new build no longer ships: torch loads
 ; every DLL it finds in torch\lib, so stale ones are not harmless. No user
-; data lives here (it is in %LocalAppData%\VoiceCraft and Documents).
+; data lives here (it is in %LocalAppData%\AditsVoiceStudio and Documents).
 ; Only when the folder holds our EXE, so another app's _internal is safe.
 Type: filesandordirs; Name: "{app}\_internal"; Check: IsOurInstall
+; Pre-rebrand EXE and shortcuts.
+Type: files; Name: "{app}\{#LegacyExeName}"; Check: IsOurInstall
+Type: files; Name: "{group}\{#LegacyTitle}.lnk"
+Type: files; Name: "{group}\{cm:UninstallProgram,{#LegacyTitle}}.lnk"
+Type: files; Name: "{autodesktop}\{#LegacyTitle}.lnk"
 
 [Files]
 #ifdef UseSignTool
@@ -122,12 +138,13 @@ Type: filesandordirs; Name: "{app}\_internal"
 
 [Code]
 // ASCII-path copies of espeak-ng made for non-ASCII user names
-// (core/paths.py ascii_path): VoiceCraft-ascii-<version>-<hash> folders.
-procedure DeleteAsciiCopies(Base: String);
+// (core/paths.py ascii_path): <AppName>-ascii-<version>-<hash> folders,
+// also VoiceCraft-ascii-* ones from before the rebrand.
+procedure DeleteAsciiCopiesNamed(Base, AppName: String);
 var
   FindRec: TFindRec;
 begin
-  if FindFirst(Base + '\{#MyAppName}-ascii-*', FindRec) then
+  if FindFirst(Base + '\' + AppName + '-ascii-*', FindRec) then
   try
     repeat
       if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0 then
@@ -138,9 +155,16 @@ begin
   end;
 end;
 
+procedure DeleteAsciiCopies(Base: String);
+begin
+  DeleteAsciiCopiesNamed(Base, '{#MyAppName}');
+  DeleteAsciiCopiesNamed(Base, 'VoiceCraft');
+end;
+
 function IsOurInstall(): Boolean;
 begin
-  Result := FileExists(ExpandConstant('{app}\{#MyAppExeName}'));
+  Result := FileExists(ExpandConstant('{app}\{#MyAppExeName}')) or
+            FileExists(ExpandConstant('{app}\{#LegacyExeName}'));
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

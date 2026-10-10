@@ -33,7 +33,7 @@ def _download_with_progress(url, dest_path, label="file",
     """
     import urllib.request
     tmp_path = dest_path + ".part"
-    request = urllib.request.Request(url, headers={"User-Agent": "TTS-Studio"})
+    request = urllib.request.Request(url, headers={"User-Agent": "AditsVoiceStudio"})
     try:
         with urllib.request.urlopen(request, timeout=30) as resp, \
                 open(tmp_path, "wb") as out:
@@ -169,7 +169,7 @@ def _weight_paths():
     """(model, voices) to load: a complete user download wins over the bundle.
 
     Frozen builds bundle both files read-only next to the code; anything the
-    app downloads itself lives in %LOCALAPPDATA%\\VoiceCraft\\models. In dev
+    app downloads itself lives in %LOCALAPPDATA%\\AditsVoiceStudio\\models. In dev
     both resolve to the repo root, as before.
     """
     if not paths.FROZEN:

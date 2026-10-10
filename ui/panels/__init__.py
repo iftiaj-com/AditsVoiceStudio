@@ -1,1 +1,1 @@
-# VoiceCraft UI panels sub-package
+# Adits Voice Studio UI panels sub-package

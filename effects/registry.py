@@ -1,7 +1,7 @@
 """
 effects/registry.py
 ────────────────────
-Master registry of every voice effect available in VoiceCraft.
+Master registry of every voice effect available in Adits Voice Studio.
 
 To add a new effect:
   1. Add the DSP method to effects/audio_effects.py.
@@ -159,7 +159,7 @@ EFFECTS_REGISTRY = [
     },
     {
         "key":    "melancholic",
-        "label":  "🌧️  Melancholic",
+        "label":  "🌧  Melancholic",
         "desc":   "Slow intimate muffled",
         "fn":     AudioEffects.melancholic,
     },
@@ -230,3 +230,12 @@ EFFECTS_REGISTRY = [
         "fn":     AudioEffects.megaphone,
     },
 ]
+
+# Cloned voices (Customization → Clone Voice) join the list as "clone:<slug>"
+# entries right after "normalize", so conversion runs before other effects.
+# A damaged voice folder or missing runtime must never stop the app starting.
+try:
+    from effects.cloned_voices import extend_with_cloned_voices
+    extend_with_cloned_voices(EFFECTS_REGISTRY)
+except Exception as _clone_err:   # noqa: BLE001
+    print(f"Cloned voices not loaded: {_clone_err}")

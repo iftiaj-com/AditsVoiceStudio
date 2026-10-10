@@ -7,8 +7,8 @@ import argparse
 import subprocess
 from pathlib import Path
 
-# VoiceCraft PyInstaller Builder
-# Compiles the app into dist/TTS_Studio (onedir), trims it, adds license
+# Adits Voice Studio PyInstaller Builder
+# Compiles the app into dist/AditsVoiceStudio (onedir), trims it, adds license
 # notices, self-tests the frozen EXE, and optionally compiles the installer.
 #
 #   .\venv_311\Scripts\python.exe build_exe.py              # build + test
@@ -17,9 +17,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent.absolute()
 sys.path.insert(0, str(BASE_DIR))
 from core.version import (APP_NAME, APP_TITLE, __version__, PUBLISHER,  # noqa: E402
-                          SOURCE_URL, LICENSE_ID)
+                          SOURCE_URL, LICENSE_ID, EXE_NAME)
 
-APP_DIR  = BASE_DIR / "dist" / "TTS_Studio"
+APP_DIR  = BASE_DIR / "dist" / EXE_NAME
 INTERNAL = APP_DIR / "_internal"
 
 # Every library PyInstaller must be able to see for the build to be complete.
@@ -43,6 +43,8 @@ _REQUIRED = {
     "faster_whisper": "word-level subtitles",
     "customtkinter":  "GUI",
     "soundfile":      "audio I/O and MP3 export",
+    "pyaudio":        "Clone Voice microphone recording",
+    "av":             "Clone Voice clip import (M4A, AAC, WebM, WMA...)",
 }
 
 # Left out of the public build on purpose:
@@ -138,6 +140,27 @@ def _bundle_models(command):
     return True
 
 
+def _bundle_vc_runtime(command):
+    """Ship the voice-cloning worker scripts and pinned requirements as data.
+
+    They run inside the separate runtime venvs (see core/voice_cloning/runtime.py),
+    never inside the frozen app, so PyInstaller's import analysis cannot find
+    them. The frozen app cannot create those venvs yet (no Python to build them
+    from), so Clone Voice shows "Not available in this build"; the files are
+    bundled so a later release can install the runtime from the EXE.
+    Nothing here is added to _REQUIRED or --collect-all: torch for cloning
+    lives in the runtime venvs, not in the app.
+    """
+    src = BASE_DIR / "vc_runtime"
+    files = sorted(list(src.glob("*.py")) + list(src.glob("requirements-*.txt")))
+    for f in files:
+        _add(command, f, "vc_runtime")
+    site = sorted((src / "train_site").glob("*.py"))
+    for f in site:
+        _add(command, f, "vc_runtime/train_site")
+    print(f"[*] Bundling voice-cloning worker files: {len(files) + len(site)} files")
+
+
 def _write_version_file(path):
     nums = [int(x) for x in re.findall(r"\d+", __version__)[:4]]
     nums += [0] * (4 - len(nums))
@@ -150,9 +173,9 @@ def _write_version_file(path):
       StringStruct('CompanyName', {PUBLISHER!r}),
       StringStruct('FileDescription', {APP_TITLE!r}),
       StringStruct('FileVersion', {__version__!r}),
-      StringStruct('InternalName', 'TTS_Studio'),
+      StringStruct('InternalName', {EXE_NAME!r}),
       StringStruct('LegalCopyright', 'Licensed under {LICENSE_ID}'),
-      StringStruct('OriginalFilename', 'TTS_Studio.exe'),
+      StringStruct('OriginalFilename', {EXE_NAME + '.exe'!r}),
       StringStruct('ProductName', {APP_TITLE!r}),
       StringStruct('ProductVersion', {__version__!r})])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
@@ -182,7 +205,7 @@ def _prune():
 def _bundled_module_names():
     """Top-level module names that made it into this build."""
     names = {p.name.split(".")[0] for p in INTERNAL.iterdir()}
-    toc = BASE_DIR / "build" / "TTS_Studio" / "PYZ-00.toc"
+    toc = BASE_DIR / "build" / EXE_NAME / "PYZ-00.toc"
     if toc.exists():
         names |= set(re.findall(r"\('([A-Za-z_][\w]*)[.']", toc.read_text(encoding="utf-8",
                                                                               errors="ignore")))
@@ -251,7 +274,7 @@ def _selftest():
     report.unlink(missing_ok=True)
     print("\n[*] Self-testing the frozen app (takes a few minutes)...")
     try:
-        proc = subprocess.run([str(APP_DIR / "TTS_Studio.exe"), "--selftest", str(report)],
+        proc = subprocess.run([str(APP_DIR / f"{EXE_NAME}.exe"), "--selftest", str(report)],
                               timeout=1800)
     except subprocess.TimeoutExpired:
         print("[!] Self-test did not finish within 30 minutes.")
@@ -286,6 +309,7 @@ def _build_installer():
         return False
     cmd = [str(iscc), f"/DMyAppVersion={__version__}", f"/DMyAppPublisher={PUBLISHER}",
            f"/DMyAppURL={SOURCE_URL}", f"/DMyAppTitle={APP_TITLE}",
+           f"/DMyAppName={APP_NAME}", f"/DMyAppExeBase={EXE_NAME}",
            str(BASE_DIR / "installer.iss")]
     print(f"\n[*] Compiling installer (this can take an hour): {' '.join(cmd)}")
     try:
@@ -321,8 +345,8 @@ def build(args):
     # fully included with their data files.
     command = [
         sys.executable, "-m", "PyInstaller",
-        "--noconsole", "--name=TTS_Studio", "--clean", "--noconfirm",
-        "--icon", str(BASE_DIR / "assets" / "voicecraft.ico"),
+        "--noconsole", f"--name={EXE_NAME}", "--clean", "--noconfirm",
+        "--icon", str(BASE_DIR / "assets" / "adits_voice_studio.ico"),
         "--splash", str(BASE_DIR / "assets" / "splash.png"),
         "--version-file", str(version_file),
     ]
@@ -351,6 +375,9 @@ def build(args):
                 break
     except Exception as e:
         print(f"[*] Warning: Could not locate NLTK data directory: {e}")
+
+    _bundle_vc_runtime(command)
+    _add(command, str(BASE_DIR / "assets"), "assets")
 
     command.append(str(BASE_DIR / "tts_app.py"))
 

@@ -87,7 +87,7 @@ DOWNLOADED ON FIRST USE (NOT INCLUDED IN THIS INSTALLER)
 --------------------------------------------------------
 MeloTTS downloads its language checkpoints (myshell-ai/MeloTTS-*, MIT) and
 BERT language models from Hugging Face the first time a language is used.
-These are stored in %LOCALAPPDATA%\VoiceCraft\cache and are covered by their
+These are stored in %LOCALAPPDATA%\AditsVoiceStudio\cache and are covered by their
 own licenses, shown on each model's Hugging Face page.
 
 

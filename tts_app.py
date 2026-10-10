@@ -1,6 +1,6 @@
 """
-tts_app.py  –  VoiceCraft entry point
-──────────────────────────────────────
+tts_app.py  –  Adits Voice Studio entry point
+──────────────────────────────────────────────
 This file is intentionally tiny. All logic lives in the packages below:
 
   core/       – constants, design tokens, voice maps
@@ -20,7 +20,7 @@ import sys
 from core.paths import configure_runtime
 configure_runtime()
 
-_MUTEX_NAME = "VoiceCraftSingleInstance"   # installer.iss AppMutex uses the same name
+_MUTEX_NAME = "AditsVoiceStudioSingleInstance"   # installer.iss AppMutex uses the same name
 
 
 def _already_running():
@@ -64,10 +64,10 @@ if __name__ == "__main__":
         sys.exit(0)
 
     from core.temp_cleanup import sweep_orphan_temp_dirs
-    from ui.app import TTSStudioApp
+    from ui.app import AditsVoiceStudioApp
 
-    # Remove tts_studio_* temp dirs orphaned by a previous crash/force-quit.
+    # Remove adits_vs_* temp dirs orphaned by a previous crash/force-quit.
     sweep_orphan_temp_dirs()
-    app = TTSStudioApp()
+    app = AditsVoiceStudioApp()
     _close_splash()
     app.mainloop()

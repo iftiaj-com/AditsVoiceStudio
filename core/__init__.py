@@ -1,1 +1,1 @@
-# VoiceCraft core package
+# Adits Voice Studio core package

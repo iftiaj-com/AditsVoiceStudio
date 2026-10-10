@@ -1,9 +1,9 @@
 """
 core/temp_cleanup.py
 ─────────────────────
-Housekeeping for tts_studio_* temp directories.
+Housekeeping for adits_vs_* temp directories.
 
-Generation creates tempfile.mkdtemp(prefix="tts_studio_") directories.
+Generation creates tempfile.mkdtemp(prefix="adits_vs_") directories.
 Normal runs clean up after themselves, but a crash or force-quit leaves
 orphans behind. sweep_orphan_temp_dirs() is called on startup to remove
 them; the age threshold keeps a concurrently running second instance's
@@ -16,11 +16,12 @@ import shutil
 import tempfile
 import time
 
-TEMP_PREFIX = "tts_studio_"
+TEMP_PREFIX = "adits_vs_"
+LEGACY_PREFIXES = ("tts_studio_",)   # before the rebrand
 
 
 def sweep_orphan_temp_dirs(max_age_seconds=3600):
-    """Delete leftover tts_studio_* dirs older than *max_age_seconds*.
+    """Delete leftover adits_vs_* (and pre-rebrand tts_studio_*) dirs older than *max_age_seconds*.
 
     Returns the number of directories removed. Never raises.
     """
@@ -33,7 +34,7 @@ def sweep_orphan_temp_dirs(max_age_seconds=3600):
 
     now = time.time()
     for name in names:
-        if not name.startswith(TEMP_PREFIX):
+        if not name.startswith((TEMP_PREFIX,) + LEGACY_PREFIXES):
             continue
         path = os.path.join(root, name)
         try:

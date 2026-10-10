@@ -1,1 +1,1 @@
-# VoiceCraft engines package
+# Adits Voice Studio engines package

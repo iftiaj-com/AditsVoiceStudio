@@ -62,3 +62,22 @@ scratch/
 Voices-training/
 test_*.py
 test_*.wav
+tools/process_logo.py
+tools/process_*.py
+
+# AI Agent directories & configs
+.claude/
+.gemini/
+.agents/
+
+# Voice cloning runtime (venvs, Applio, seed-vc, voices) - see AGENTS.md
+vc_runtime_data/
+# RVC search indexes that come with downloaded voice models (*.pth is above)
+*.index
+# Partial downloads and interrupted atomic writes (profile.json.tmp, runtime.json.tmp)
+*.part
+*.tmp
+
+# Self-test reports (tts_app.py --selftest <report.json>)
+selftest*.json
+report.json

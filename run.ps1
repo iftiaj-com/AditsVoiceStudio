@@ -3,7 +3,7 @@ $VENV_PYTHON = ".\venv_311\Scripts\python.exe"
 $APP_SCRIPT = ".\tts_app.py"
 
 if (Test-Path $VENV_PYTHON) {
-    Write-Host "--- Launching TTS Studio ---" -ForegroundColor Green
+    Write-Host "--- Launching Adits Voice Studio ---" -ForegroundColor Green
     & $VENV_PYTHON $APP_SCRIPT
 } else {
     Write-Host "Error: Virtual environment not found in .\venv_311\" -ForegroundColor Red

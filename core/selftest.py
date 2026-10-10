@@ -1,7 +1,7 @@
 """
 core/selftest.py
 ─────────────────
-`TTS_Studio.exe --selftest report.json` exercises the frozen build without
+`AditsVoiceStudio.exe --selftest report.json` exercises the frozen build without
 opening the window and writes a JSON report. build_exe.py runs it after every
 build; it is also handy on a test PC after installing.
 
@@ -47,7 +47,7 @@ def run(report_path):
                 report["ok"] = False
         checks[name]["secs"] = round(time.time() - t0, 1)
 
-    tmp = tempfile.mkdtemp(prefix="tts_studio_selftest_")
+    tmp = tempfile.mkdtemp(prefix="adits_vs_selftest_")
     engines = {}
 
     def _engines():

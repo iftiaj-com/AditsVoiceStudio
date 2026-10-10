@@ -42,7 +42,7 @@ class TextPanel:
         self.text_input.pack(fill=pack_fill, expand=pack_expand, padx=16, pady=(0, 4))
         self.text_input.insert(
             "1.0",
-            "Hello, world! Welcome to TTS Studio — your personal text-to-speech studio. "
+            "Hello, world! Welcome to Adits Voice Studio — your personal text-to-speech studio. "
             "Try different engines, voices, and effects to create unique speech outputs!"
         )
 
