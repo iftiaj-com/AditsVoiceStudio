@@ -70,7 +70,7 @@ tools/process_*.py
 .gemini/
 .agents/
 
-# Voice cloning runtime (venvs, Applio, seed-vc, voices) - see agent.md
+# Voice cloning runtime (venvs, Applio, seed-vc, voices) - see AGENTS.md
 vc_runtime_data/
 # RVC search indexes that come with downloaded voice models (*.pth is above)
 *.index

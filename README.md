@@ -6,7 +6,7 @@ It can also clone a voice from your own recordings and use it like any other
 effect.
 
 Everything runs locally on your PC. Developer and architecture notes are in
-[agent.md](agent.md).
+[AGENTS.md](AGENTS.md).
 
 ## Features
 
@@ -31,7 +31,7 @@ python -m venv venv_311
 ```
 
 Always call the venv's own `python.exe` as shown. See *Environment traps* in
-[agent.md](agent.md) for why.
+[AGENTS.md](AGENTS.md) for why.
 
 ## Clone Voice
 
