@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import threading
 import subprocess
+import webbrowser
 import re
 
 # Pyinstaller windowed-mode fix. tts_app.py normally routes these to a log
@@ -36,7 +37,7 @@ from core.constants import COLORS, FONTS
 from core import paths
 from core.audio_io import load_segment, export_mp3
 from core.version import APP_TITLE
-from ui.theme import card
+from ui.theme import card, SmoothScrollableFrame
 from ui.panels.text_panel          import TextPanel
 from ui.panels.engine_panel        import EnginePanel
 from ui.panels.effects_panel       import EffectsPanel
@@ -151,7 +152,7 @@ class TTSStudioApp(ctk.CTk):
         left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
         # Right Column (Scrollable list of panels: TTS Engine, Customization, Voice Effects)
-        right_scroll = ctk.CTkScrollableFrame(
+        right_scroll = SmoothScrollableFrame(
             content_frame, fg_color="transparent",
             scrollbar_button_color=COLORS["border"],
             scrollbar_button_hover_color=COLORS["accent_primary"]
@@ -206,14 +207,13 @@ class TTSStudioApp(ctk.CTk):
                                           font=FONTS["status"],
                                           text_color=COLORS["text_secondary"])
         self._status_label.pack(side="left")
-        engine_badge_text = self._available_engines[0].name.split("(")[0].strip() \
-            if self._available_engines else "None"
-        self._engine_badge = ctk.CTkLabel(si, text=engine_badge_text,
-                                          font=FONTS["body_small"],
-                                          text_color=COLORS["accent_primary"],
-                                          fg_color=COLORS["bg_input"],
-                                          corner_radius=6, width=60, height=22)
-        self._engine_badge.pack(side="right", padx=(8, 0))
+        self._site_link = ctk.CTkLabel(si, text="www.iftiaj.com",
+                                       font=FONTS["body_small"],
+                                       text_color=COLORS["accent_primary"],
+                                       fg_color=COLORS["bg_input"],
+                                       corner_radius=6, width=60, height=22, cursor="hand2")
+        self._site_link.pack(side="right", padx=(8, 0))
+        self._site_link.bind("<Button-1>", lambda e: webbrowser.open("https://www.iftiaj.com"))
 
     # ──────────────────────────────────────────────────────────────
     #  STATUS

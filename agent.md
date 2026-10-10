@@ -74,11 +74,11 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `└── cloned_voices.py` | Cloned Voice Effects | Turns each ready voice into a `clone:<slug>` registry entry and converts audio through the worker. |
 | **`ui/`** | Directory | GUI presentation layer. |
 | `├── app.py` | Core GUI Controller | The main window class `VoiceCraftApp`. Orchestrates the background thread worker, playback systems, and save actions. |
-| `├── theme.py` | UI Factory | Helper functions for creating CustomTkinter standard panels, dropdowns, sliders, and switches. |
+| `├── theme.py` | UI Factory | Helper functions for creating CustomTkinter standard panels, dropdowns, sliders, and switches. `SmoothScrollableFrame` (the right column) eases wheel scrolling: CTk's own handler moves 20 px and redraws on every wheel event, and with about 900 widgets each redraw takes 15 to 20 ms, so fast spins stuttered. |
 | `└── panels/` | Directory | Custom panel sub-widgets. |
 | `    ├── text_panel.py` | GUI Widget | Renders the text area and updates the live character count. |
 | `    ├── engine_panel.py` | GUI Widget | Engine dropdown, GPU toggle, and dynamically swapped configuration screens for each engine. |
-| `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry, in two sub-sections: Cloned Voices (with the ✏️ button) and Effects. |
+| `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry, in three sub-sections: Favourites, Cloned Voices (with the ✏️ button) and Effects. The ♡ on each card adds a mirror card to Favourites that shares the original's switch variable, so both always show the same state. Favourite keys are saved in `%LOCALAPPDATA%\VoiceCraft\settings\favourites.json`; a deleted cloned voice is dropped from it. |
 | `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
 | `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
 | `    ├── clone_voice_dialog.py` | GUI Widget | Rename / delete window opened by the ✏️ button in the Cloned Voices header. |
@@ -339,6 +339,14 @@ There are three ways to make a voice:
   file), and for training Epochs, Batch and Sample rate. The estimated time
   updates as the options change. One progress row with ✖ Cancel serves install,
   creation, training, preview and pitch matching.
+* **Layout.** Each tab is a set of tiles (`_tile()`): Voice and Sound on Active
+  voice; New voice, Recordings (or Model files), Clean-up and Training on Create
+  voice, then the estimate and 🧬 Create Voice. `_layout()` puts two tiles per
+  row when the box is at least `WIDE_PX` (600 unscaled px) wide, else one; a tile
+  alone in its row spans the box, and Clean-up then shows its three options side
+  by side. ▶ Preview moves under the base voice for RVC voices so both tiles end
+  level. Explanations are hover tips (`_Tip`), not notes under the controls.
+  Never grid an empty `CTkFrame`: it keeps its default 200 px height.
 * **Voice Effects → Cloned Voices → ✏️:** rename or delete voices. Unfinished and
   failed voices are listed too, so they can be cleaned up.
 * Settings are saved to the voice's `profile.json` as the sliders move.
@@ -346,8 +354,7 @@ There are three ways to make a voice:
   microphone (default host API, default device first), record with a live level
   meter and waveform (auto-stop at 10 minutes), then preview with ▶/⏸, a seek
   slider or a click on the waveform, and **Add to clips**, **Record again** or
-  **Discard**. Takes are 16-bit mono WAV in `<root>
-ecordings\` (gitignored with
+  **Discard**. Takes are 16-bit mono WAV in `<root>\recordings\` (gitignored with
   the runtime root) and become normal clips, so trim and cleanup apply to them.
   Capture uses PyAudio (`requirements.txt`, and `_REQUIRED` in `build_exe.py`).
 * **Base voice.** A clone sounds best when converted from the engine voice it was
@@ -375,15 +382,15 @@ first, and cloning reads those copies (`clip["used"]`). The originals in
 `clips/` are never changed.
 
 * **Use part of each recording.** Presets count recording time from the start
-  of the first clip and continue into the next clip: Quick has First 10 / 20 /
-  25 s (Seed-VC reads at most 25 s), Train has First 1 / 3 / 5 min. **Custom**
+  of the first clip and continue into the next clip: Quick has 10 / 20 /
+  25 s (Seed-VC reads at most 25 s), Train has 1 / 3 / 5 min. **Custom**
   lists every clip with a ✂ Edit button that opens `TimelineDialog`: drag the
   selection to move it, drag its edges to resize, drag on empty waveform (or
   anywhere when the whole clip is selected) for a new selection, − / + / Fit
   zoom, wheel pans, Ctrl+wheel zooms, typed Start / End, quick lengths, and
   ▶ Play selection with a playhead. Ranges are stored per clip as `start` / `end`
   seconds in `profile.json`.
-* **Remove background music & noise.** Runs Demucs (`htdemucs`) in the RVC
+* **Remove music & noise.** Runs Demucs (`htdemucs`) in the RVC
   worker (`cmd: "separate"`) and keeps the vocal stem; the optional checkbox
   adds `noisereduce` (stationary) for hiss and hum. **Preview cleanup** separates
   up to 30 s of the first selection and offers ▶ Original / ▶ Cleaned. Pitch

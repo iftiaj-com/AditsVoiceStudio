@@ -53,7 +53,7 @@ Find it in **Customization → Clone Voice**.
 3. **Optional clean-up** before cloning, applied in this order:
    * **Use part of each recording:** first 10, 20 or 25 seconds (Quick), first
      1, 3 or 5 minutes (Train), or pick a range on a waveform timeline.
-   * **Remove background music & noise:** separates the voice from music, with
+   * **Remove music & noise:** separates the voice from music, with
      an option to also reduce hiss and hum. **Preview cleanup** lets you compare
      before and after.
    * **Skip silences:** removes long pauses.

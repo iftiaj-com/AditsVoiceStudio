@@ -34,14 +34,17 @@ class EnginePanel:
             ).pack(anchor="w", padx=16, pady=(14, 10))
         self._system_voices = system_voices
 
-        # ── Engine selector + GPU toggle (stacked vertically to prevent wide layouts) ──
+        # ── Engine selector, GPU toggle on the right edge of the same row ──
+        # The dropdown stretches between the label and the toggle, so the row
+        # also fits the narrowest window (500 px column).
         engine_row = ctk.CTkFrame(self._frame, fg_color="transparent")
-        engine_row.pack(fill="x", padx=16, pady=(0, 6))
+        engine_row.pack(fill="x", padx=16, pady=(0, 10))
+        engine_row.columnconfigure(1, weight=1)
 
         engine_names = [e.name for e in available_engines] or ["No TTS engines available"]
 
         ctk.CTkLabel(engine_row, text="Engine", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).pack(side="left", padx=(0, 10))
+                     text_color=COLORS["text_secondary"]).grid(row=0, column=0, sticky="w", padx=(0, 10))
 
         # Default to Kokoro if present
         default_val = engine_names[0]
@@ -58,24 +61,21 @@ class EnginePanel:
             button_hover_color=COLORS["accent_secondary"],
             dropdown_fg_color=COLORS["bg_card"],
             dropdown_hover_color=COLORS["accent_primary"],
-            corner_radius=8, width=280,
+            corner_radius=8, width=160,
             command=self._on_engine_change,
         )
-        self._engine_menu.pack(side="left")
-
-        gpu_row = ctk.CTkFrame(self._frame, fg_color="transparent")
-        gpu_row.pack(fill="x", padx=16, pady=(0, 10))
+        self._engine_menu.grid(row=0, column=1, sticky="ew")
 
         self.gpu_var = ctk.BooleanVar(value=torch.cuda.is_available())
         ctk.CTkSwitch(
-            gpu_row, text="GPU Acceleration (PyTorch)", variable=self.gpu_var,
+            engine_row, text="GPU Acceleration (PyTorch)", variable=self.gpu_var,
             font=FONTS["body_small"], text_color=COLORS["text_secondary"],
             onvalue=True, offvalue=False,
             button_color=COLORS["accent_primary"],
             button_hover_color=COLORS["accent_secondary"],
             progress_color=COLORS["success"],
             fg_color=COLORS["switch_off"],
-        ).pack(side="left", padx=(54, 0))
+        ).grid(row=0, column=2, sticky="e", padx=(16, 0))
 
         # ── Per-engine sub-frames ──────────────────────────────────
         self._sub_frames: dict[str, ctk.CTkFrame] = {}
