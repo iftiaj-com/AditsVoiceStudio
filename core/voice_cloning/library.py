@@ -43,7 +43,9 @@ class VoiceProfile:
     mode: str                         # "rvc" | "seedvc"
     status: str = "draft"
     created_at: str = ""
-    clips: list = field(default_factory=list)       # [{"path": "clips/x.mp3", "seconds": 61.2}]
+    # [{"path": "clips/x.mp3", "seconds": 61.2, "start": 3.0, "end": 23.0, "used": "processed/000_clean.wav"}]
+    # start/end (seconds) select part of a clip; "used" is the trimmed/cleaned copy cloning reads.
+    clips: list = field(default_factory=list)
     total_seconds: float = 0.0
     reference_wav: str = None         # seedvc
     pth: str = None                   # rvc
@@ -61,6 +63,11 @@ class VoiceProfile:
     # {"engine": "Kokoro-82M (Fast Local AI)", "kind": "kokoro", "lang": "American English",
     #  "voice": "am_onyx"}. Switching the voice on re-selects it (see EnginePanel).
     base_selection: dict = None
+    # Optional clip preparation chosen at creation:
+    # {"trim": "first10" | "first20" | "first25" | "first60" | ... | "custom" | None,
+    #  "separate": bool (remove background music), "denoise": bool (also reduce steady noise),
+    #  "skip_silences": bool (drop pauses from the prepared audio, applied last)}
+    prep: dict = None
     base_f0_hz: float = None
     target_f0_hz: float = None
     imported: bool = False
@@ -174,7 +181,7 @@ def list_voices(ready_only=False) -> list:
 def update_params(slug, **changes) -> VoiceProfile:
     allowed = {"name", "pitch", "index_rate", "protect", "diffusion_steps", "status", "error",
                "pth", "index", "sample_rate", "epochs", "batch_size", "reference_wav",
-               "base_f0_hz", "target_f0_hz", "base_engine", "base_voice", "base_selection"}
+               "base_f0_hz", "target_f0_hz", "base_engine", "base_voice", "base_selection", "prep"}
     bad = set(changes) - allowed
     if bad:
         raise ValueError(f"Cannot update {sorted(bad)}")
@@ -210,7 +217,9 @@ def audio_seconds(path) -> float:
         return len(load_segment(str(path))) / 1000.0
 
 
-def create_voice(name, mode, clip_paths, base_engine="", base_voice="", base_selection=None) -> VoiceProfile:
+def create_voice(name, mode, clip_paths, base_engine="", base_voice="", base_selection=None,
+                 prep=None) -> VoiceProfile:
+    """clip_paths: file paths, or dicts {"path", "start", "end"} to use part of a clip (seconds)."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     if not clip_paths:
@@ -220,7 +229,9 @@ def create_voice(name, mode, clip_paths, base_engine="", base_voice="", base_sel
         d = runtime.voices_dir() / slug
         (d / "clips").mkdir(parents=True)
     clips, used = [], set()
-    for src in clip_paths:
+    for item in clip_paths:
+        sel = item if isinstance(item, dict) else {"path": item}
+        src = sel["path"]
         stem, ext = os.path.splitext(os.path.basename(src))
         fname, n = f"{stem}{ext}", 2
         while fname.lower() in used:
@@ -228,21 +239,112 @@ def create_voice(name, mode, clip_paths, base_engine="", base_voice="", base_sel
         used.add(fname.lower())
         dst = d / "clips" / fname
         shutil.copyfile(src, dst)
-        clips.append({"path": f"clips/{fname}", "seconds": round(audio_seconds(dst), 2)})
+        full = audio_seconds(dst)
+        clip = {"path": f"clips/{fname}", "seconds": round(full, 2)}
+        start, end = sel.get("start"), sel.get("end")
+        if start is not None or end is not None:
+            start = max(0.0, float(start or 0.0))
+            end = min(full, float(end if end is not None else full))
+            if end - start < 0.5:
+                raise ValueError(f"The selected part of {os.path.basename(src)} is shorter than 0.5 s.")
+            clip.update(start=round(start, 3), end=round(end, 3), seconds=round(end - start, 2))
+        clips.append(clip)
     p = VoiceProfile(
         name=name.strip() or slug, slug=slug, mode=mode, status="draft",
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         clips=clips, total_seconds=round(sum(c["seconds"] for c in clips), 2),
         base_engine=base_engine, base_voice=base_voice, base_selection=base_selection,
+        prep=prep,
     )
     save_voice(p)
     return p
 
 
+def _trimmed(seg, clip):
+    """Apply a clip's start/end selection (seconds) to an AudioSegment."""
+    start, end = clip.get("start"), clip.get("end")
+    if start is None and end is None:
+        return seg
+    a = int(round(float(start or 0.0) * 1000))
+    b = int(round(float(end) * 1000)) if end is not None else len(seg)
+    return seg[a:b]
+
+
+def clip_audio_paths(p: VoiceProfile) -> list:
+    """The audio each clip contributes: its prepared copy when there is one."""
+    return [str(p.dir / (c.get("used") or c["path"])) for c in p.clips]
+
+
 def _clip_segments(p: VoiceProfile):
     from core.audio_io import load_segment
     for c in p.clips:
-        yield load_segment(str(p.dir / c["path"]))
+        if c.get("used"):
+            yield load_segment(str(p.dir / c["used"]))      # already trimmed / cleaned
+        else:
+            yield _trimmed(load_segment(str(p.dir / c["path"])), c)
+
+
+def _drop_silences(seg):
+    """Remove pauses longer than 0.4 s, keeping 150 ms around each phrase.
+
+    The threshold follows the clip's own loudness (16 dB under its average,
+    never above -40 dBFS), so quiet and loud recordings are treated alike.
+    """
+    from pydub import silence as pydub_silence
+    if seg.dBFS == float("-inf"):
+        return seg
+    thresh = min(-40.0, seg.dBFS - 16)
+    chunks = pydub_silence.split_on_silence(seg, min_silence_len=400, silence_thresh=thresh,
+                                            keep_silence=150)
+    if not chunks:
+        return seg
+    out = chunks[0]
+    for c in chunks[1:]:
+        out += c
+    return out
+
+
+def prepare_clips(p: VoiceProfile, separate_fn=None, denoise=False, progress_cb=None,
+                  check_cancel=None, skip_silences=False) -> VoiceProfile:
+    """Write the prepared copy of every clip: trim → remove music/noise → skip silences.
+
+    separate_fn(in_wav, out_wav, denoise) runs the music-removal worker. The
+    originals in clips/ are never changed; copies go to processed/ and each
+    clip's "used" points at the copy cloning should read.
+    """
+    say = progress_cb or (lambda frac, msg: None)
+    out_dir = p.dir / "processed"
+    shutil.rmtree(out_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True)
+    from core.audio_io import load_segment
+    n = len(p.clips)
+    for i, c in enumerate(p.clips):
+        if check_cancel:
+            check_cancel()
+        say(i / n, f"Preparing clip {i + 1} of {n}…")
+        seg = _trimmed(load_segment(str(p.dir / c["path"])), c)
+        trimmed = out_dir / f"{i:03d}.wav"
+        seg.set_sample_width(2).export(str(trimmed), format="wav")
+        used = trimmed
+        if separate_fn is not None:
+            say((i + 0.3) / n, f"Removing background music from clip {i + 1} of {n}…")
+            cleaned = out_dir / f"{i:03d}_clean.wav"
+            separate_fn(str(trimmed), str(cleaned), denoise)
+            used = cleaned
+        if skip_silences:
+            if check_cancel:
+                check_cancel()
+            say((i + 0.9) / n, f"Skipping silences in clip {i + 1} of {n}…")
+            tight = _drop_silences(load_segment(str(used)))
+            if len(tight) < 500:
+                raise ValueError(f"Clip {i + 1} has almost no speech left after skipping silences.")
+            dense = out_dir / f"{i:03d}_nosilence.wav"
+            tight.set_sample_width(2).export(str(dense), format="wav")
+            used = dense
+        c["used"] = used.relative_to(p.dir).as_posix()
+    save_voice(p)
+    say(1.0, "Clips prepared")
+    return p
 
 
 def build_seedvc_reference(p: VoiceProfile, max_seconds=MAX_REF_SECONDS) -> Path:

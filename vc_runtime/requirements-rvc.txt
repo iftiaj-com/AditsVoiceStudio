@@ -36,3 +36,10 @@ beautifulsoup4==4.15.0
 sounddevice==0.5.5
 webrtcvad-wheels==2.0.14
 psutil==7.2.2
+
+# Background-music removal for clone clips (Clone Voice → Remove background
+# music). From github.com/adefossez/demucs (the maintained fork; the
+# facebookresearch repo is archived). Adds only julius, lameenc and sphn and
+# leaves torch/numpy alone. audio-separator was rejected: it upgrades torch.
+# Weights (~81 MB) come from Hugging Face "adefossez/HTDemucs" on first use.
+demucs==4.1.0

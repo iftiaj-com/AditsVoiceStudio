@@ -189,6 +189,8 @@ def main():
                     result = backend.inspect(req["pth"])
                 elif cmd == "train" and args.engine == "rvc":
                     result = backend.train(req, ctx)
+                elif cmd == "separate" and args.engine == "rvc":
+                    result = backend.separate(req, ctx)
                 else:
                     raise TaskError("generic", f"Unsupported command {cmd!r} for {args.engine}")
             emit({"id": rid, "event": "done", "result": result})

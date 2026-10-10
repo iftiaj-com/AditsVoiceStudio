@@ -266,6 +266,23 @@ class VCClient:
         w = self._worker(profile.mode, "convert")
         return w.request(payload, cancel_event=cancel_event, on_event=on_event)
 
+    def separate(self, in_wav, out_wav, *, denoise=False, cancel_event=None, status_cb=None) -> dict:
+        """Remove background music (and optionally steady noise) from in_wav.
+
+        Runs Demucs in the RVC convert worker (GPU). Refused while training.
+        """
+        if self.training_active:
+            raise VCBusy("A voice is being trained, so audio cleanup is unavailable until it finishes.")
+
+        def on_event(ev):
+            if status_cb and ev.get("event") == "progress" and ev.get("message"):
+                status_cb(ev["message"])
+
+        w = self._worker("rvc", "convert")
+        return w.request({"cmd": "separate", "in": str(in_wav), "out": str(out_wav),
+                          "denoise": bool(denoise)},
+                         cancel_event=cancel_event, on_event=on_event)
+
     def train_rvc(self, profile, dataset_dir, *, epochs=150, batch_size=2, sample_rate=40000,
                   save_every_epoch=10, keep_checkpoints=False, fresh=True,
                   progress_cb=None, log_cb=None, cancel_event=None) -> dict:

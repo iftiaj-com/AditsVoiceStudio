@@ -43,6 +43,15 @@ def quick_create_seconds(audio_seconds):
     return 3 + 0.05 * float(audio_seconds)
 
 
+def separation_seconds(audio_seconds, first_use=False):
+    """Demucs music removal: 68.9 s of audio took 10.1 s on the GTX 1650.
+
+    First use loads the model (and once, downloads ~80 MB): that run took
+    96 s including the download; ~30 s is assumed once it is cached.
+    """
+    return 2 + 0.15 * max(0.0, float(audio_seconds)) + (35 if first_use else 0)
+
+
 def speech_seconds(text):
     words = len((text or "").split())
     return words / WORDS_PER_SECOND

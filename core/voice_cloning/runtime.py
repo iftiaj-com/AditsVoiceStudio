@@ -173,6 +173,7 @@ def child_env() -> dict:
         "PIP_CACHE_DIR": str(root / "pip-cache"),
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
         "HF_HOME": str(root / "hf_home"),
+        "TORCH_HOME": str(root / "models_cache" / "torch"),   # Demucs weights
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUNBUFFERED": "1",
         "PYTHONNOUSERSITE": "1",
@@ -227,6 +228,17 @@ def is_installed(engine) -> bool:
             and repo_dir(engine).is_dir())
 
 
+def needs_update(engine) -> bool:
+    """Installed, but vc_runtime/requirements-<engine>.txt changed since (new packages)."""
+    entry = load_manifest()["engines"].get(engine) or {}
+    if not is_installed(engine):
+        return False
+    try:
+        return entry.get("requirements_sha256") != _sha256(requirements_file(engine))
+    except OSError:
+        return False
+
+
 def frozen_unsupported() -> bool:
     """The installed EXE has no Python to build venvs from yet (deferred)."""
     return paths.FROZEN
@@ -239,6 +251,7 @@ def status() -> dict:
         "frozen_unsupported": frozen_unsupported(),
         "engines": {
             name: {"label": spec["label"], "installed": is_installed(name),
+                   "needs_update": needs_update(name),
                    **(manifest["engines"].get(name) or {})}
             for name, spec in ENGINES.items()
         },

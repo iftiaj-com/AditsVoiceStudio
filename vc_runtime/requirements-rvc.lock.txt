@@ -12,6 +12,7 @@ colorama==0.4.6
 contourpy==1.4.0
 cycler==0.12.1
 decorator==5.3.1
+demucs==4.1.0
 einops==0.8.2
 faiss-cpu==1.14.3
 filelock==3.32.3
@@ -28,7 +29,9 @@ hyper-connections==0.4.11
 idna==3.20
 Jinja2==3.1.6
 joblib==1.6.0
+julius==0.2.8
 kiwisolver==1.5.1
+lameenc==1.8.4
 lazy-loader==0.6
 librosa==0.11.0
 llvmlite==0.50.0
@@ -72,6 +75,7 @@ sounddevice==0.5.5
 soundfile==0.14.0
 soupsieve==2.10
 soxr==1.1.0
+sphn==0.2.1
 stftpitchshift==2.0
 swift-f0==0.3.0
 sympy==1.14.0

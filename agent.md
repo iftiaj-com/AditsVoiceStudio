@@ -81,6 +81,7 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
 | `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
 | `    ├── clone_voice_dialog.py` | GUI Widget | Rename / delete window opened by the ✏️ button in the Cloned Voices header. |
+| `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
 | **`vc_runtime/`** | Directory | Code that runs **inside** the voice-cloning venvs and is never imported by the app: `worker.py`, `vc_common.py`, `rvc_backend.py`, `seedvc_backend.py`, `train_site/sitecustomize.py`, and the pinned `requirements-*.txt` / `.lock.txt`. |
 | **`vc_runtime_data/`** | Directory (gitignored) | The installed runtime when running from source: venvs, Applio and seed-vc clones, logs, and the voice library. |
@@ -355,6 +356,50 @@ There are three ways to make a voice:
   bundles its own FFmpeg libraries and already ships with the app because
   faster-whisper needs it, so no ffmpeg install is required.
 
+### Preparing clips (optional)
+
+Three switches on the Create voice tab, all off by default. With either on,
+`library.prepare_clips()` writes a copy of every clip to `voices/<slug>/processed/`
+first, and cloning reads those copies (`clip["used"]`). The originals in
+`clips/` are never changed.
+
+* **Use part of each recording.** Presets count recording time from the start
+  of the first clip and continue into the next clip: Quick has First 10 / 20 /
+  25 s (Seed-VC reads at most 25 s), Train has First 1 / 3 / 5 min. **Custom**
+  lists every clip with a ✂ Edit button that opens `TimelineDialog`: drag the
+  selection to move it, drag its edges to resize, drag on empty waveform (or
+  anywhere when the whole clip is selected) for a new selection, − / + / Fit
+  zoom, wheel pans, Ctrl+wheel zooms, typed Start / End, quick lengths, and
+  ▶ Play selection with a playhead. Ranges are stored per clip as `start` / `end`
+  seconds in `profile.json`.
+* **Remove background music & noise.** Runs Demucs (`htdemucs`) in the RVC
+  worker (`cmd: "separate"`) and keeps the vocal stem; the optional checkbox
+  adds `noisereduce` (stationary) for hiss and hum. **Preview cleanup** separates
+  up to 30 s of the first selection and offers ▶ Original / ▶ Cleaned. Pitch
+  matching measures the cleaned audio.
+* **Skip silences.** Applied last, to the trimmed and cleaned audio: pauses
+  longer than 0.4 s are removed (threshold 16 dB under the clip's average,
+  never above -40 dBFS, 150 ms kept around each phrase). Order: trim, remove
+  music / noise, skip silences. Stored as `prep.skip_silences`.
+
+Measured on `Voices-training\BLJ Voice over.mp3` (68.9 s, voice over music): the
+voice stem transcribed the same as the original; music-only stretches dropped
+to about -70 dB, so the reference builder's silence removal discards them
+(0 to 36 s became 14.3 s of speech). Separation took 10.1 s for 68.9 s warm, plus
+about 1.2 GB GPU memory. The first use downloads about 81 MB of weights.
+
+Demucs choice: the PyPI package `demucs==4.1.0` is published from
+`github.com/adefossez/demucs` (the maintained fork; the facebookresearch repo is
+archived at v4.0.1). It adds only julius, lameenc and sphn. Weights load from
+Hugging Face `adefossez/HTDemucs` into `$HF_HOME` (the runtime root), with Meta's
+server only as a fallback. `audio-separator` was rejected because it upgrades
+torch to 2.14, which breaks the Applio pin.
+
+When `vc_runtime/requirements-<engine>.txt` changes, `runtime.needs_update()`
+compares it with the manifest and the Clone Voice header shows **⬆ Update**,
+which re-runs `install()` for that engine only (33 s here; pip skips what is
+present).
+
 ### Architecture
 
 The cloning engines need versions of torch, numpy and transformers that clash
@@ -498,6 +543,9 @@ comes from the measured epoch times instead.
   torch may drop the GTX 1650.
 * A venv's `python.exe` on Windows is a launcher that starts the real
   interpreter as a child. Always kill with `/T`.
+* Never name a method `_w` on a Tk or CustomTkinter widget subclass. Tk stores
+  the widget's path name in `self._w`, so the method replaces it and drawing
+  fails with "'str' object is not callable".
 * `CustomizationPanel.cleanup()` also runs when the ambiance choice changes, so
   clone cleanup is called from `TTSStudioApp.destroy()`, not from there.
 
@@ -510,6 +558,7 @@ comes from the measured epoch times instead.
 | Training stops with "ran out of memory (RAM)" | Close browsers and IDEs. Keep `VC_MAX_LOADER_WORKERS` at 0. |
 | Training stops with "Out of GPU memory" | Lower the batch size (2, then 1). |
 | A stray `python.exe` after closing | `Get-CimInstance Win32_Process -Filter "Name='python.exe'"`, look for `worker.py` or `core.py`, then `taskkill /F /T /PID <pid>`. |
+| Music removal says the package is not installed | Press **⬆ Update** in Clone Voice (adds `demucs` to `venv_rvc`). |
 | Base models look damaged | Delete the file under `<root>\Applio\rvc\models\...` and run the install again. |
 | Start over | Delete `<root>\runtime.json` (keeps everything, re-verifies) or call `runtime.uninstall()` (keeps `voices/`). |
 

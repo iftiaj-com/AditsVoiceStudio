@@ -43,6 +43,12 @@ MODE_HINTS = {
     "Import model": "Use an existing RVC voice model (.pth), with its .index if you have it.",
 }
 SR_CHOICES = {"32 kHz": 32000, "40 kHz": 40000, "48 kHz": 48000}
+# "Use part of each recording" presets. Seed-VC (Quick) only reads 25 s of
+# reference, so Quick stops at 25 s; training uses everything it is given.
+TRIM_PRESETS = {
+    "Quick": {"First 10 s": 10, "First 20 s": 20, "First 25 s": 25, "Custom": None},
+    "Train (RVC)": {"First 1 min": 60, "First 3 min": 180, "First 5 min": 300, "Custom": None},
+}
 
 
 def _btn(parent, text, command, color, width=110, filled=False, state="normal"):
@@ -72,7 +78,8 @@ class CloneVoiceGroup:
         self._active_slug = None
         self._active_profile = None
         self._save_job = None
-        self._clips = []
+        self._clips = []                # [{"path", "seconds" (full length), "start", "end"}]
+        self._cleanup_preview = None    # (original_wav, cleaned_wav) from the last cleanup preview
         self._pth = None
         self._index = None
         self._tmp_dirs = []
@@ -94,6 +101,12 @@ class CloneVoiceGroup:
                      text_color=COLORS["text_secondary"]).pack(side="left")
         self._status = _small(head, "", COLORS["text_muted"])
         self._status.pack(side="right")
+        # Shown when a newer app needs extra runtime packages (e.g. music removal).
+        self._update_btn = ctk.CTkButton(head, text="⬆  Update", font=FONTS["body_small"], width=80,
+                                         height=24, corner_radius=8, fg_color=COLORS["bg_card"],
+                                         hover_color=COLORS["accent_primary"],
+                                         border_color=COLORS["warning"], border_width=1,
+                                         command=self._on_update)
 
         # not-installed panel
         self._setup = ctk.CTkFrame(inner, fg_color="transparent")
@@ -250,9 +263,11 @@ class CloneVoiceGroup:
         self._clips_label = _small(self._clips_row, "No clips", COLORS["text_muted"])
         self._clips_label.pack(side="left")
 
+        self._build_prep(page)
+
         # import
         self._import_row = ctk.CTkFrame(page, fg_color="transparent")
-        self._import_row.grid(row=4, column=0, sticky="ew", pady=(6, 2))
+        self._import_row.grid(row=5, column=0, sticky="ew", pady=(6, 2))
         imp1 = ctk.CTkFrame(self._import_row, fg_color="transparent")
         imp1.pack(fill="x", pady=1)
         _btn(imp1, "📂  Model .pth", self._on_pick_pth, COLORS["accent_primary"], width=120).pack(side="left", padx=(0, 8))
@@ -266,7 +281,7 @@ class CloneVoiceGroup:
 
         # training options
         self._train_opts = ctk.CTkFrame(page, fg_color="transparent")
-        self._train_opts.grid(row=5, column=0, sticky="ew", pady=(4, 0))
+        self._train_opts.grid(row=6, column=0, sticky="ew", pady=(4, 0))
         self._train_opts.columnconfigure(0, weight=1)
         self.epochs_var = ctk.DoubleVar(value=150)
         self._slider_row(self._train_opts, 0, "Epochs:", self.epochs_var, 10, 500, 49,
@@ -292,11 +307,187 @@ class CloneVoiceGroup:
 
         self._create_est = _small(page, "", COLORS["text_secondary"], anchor="w", justify="left",
                                   wraplength=420)
-        self._create_est.grid(row=6, column=0, sticky="w", pady=(6, 0))
+        self._create_est.grid(row=7, column=0, sticky="w", pady=(6, 0))
         self._create_btn = _btn(page, "🧬  Create Voice", self._on_create, COLORS["accent_primary"],
                                 width=150, filled=True)
-        self._create_btn.grid(row=7, column=0, sticky="w", pady=(6, 0))
+        self._create_btn.grid(row=8, column=0, sticky="w", pady=(6, 0))
         return page
+
+    def _switch(self, parent, text, var, command):
+        return ctk.CTkSwitch(parent, text=text, variable=var, command=command,
+                             font=FONTS["body_small"], text_color=COLORS["text_secondary"],
+                             button_color=COLORS["accent_primary"], button_hover_color=COLORS["accent_secondary"],
+                             progress_color=COLORS["success"], fg_color=COLORS["switch_off"],
+                             switch_width=32, switch_height=16)
+
+    def _build_prep(self, page):
+        """Optional clip preparation: use part of each recording, remove background music."""
+        prep = ctk.CTkFrame(page, fg_color="transparent")
+        prep.grid(row=4, column=0, sticky="ew", pady=(4, 0))
+        prep.columnconfigure(0, weight=1)
+        self._prep = prep
+
+        # 1. use part of each recording
+        self.trim_on = ctk.BooleanVar(value=False)
+        self._switch(prep, "Use part of each recording", self.trim_on,
+                     self._update_create).grid(row=0, column=0, sticky="w", pady=(2, 0))
+        self._trim_box = ctk.CTkFrame(prep, fg_color="transparent")
+        self._trim_box.grid(row=1, column=0, sticky="ew", padx=(42, 0))
+        self.trim_var = ctk.StringVar(value="First 20 s")
+        self._trim_seg = ctk.CTkSegmentedButton(
+            self._trim_box, values=list(TRIM_PRESETS["Quick"]), variable=self.trim_var,
+            command=lambda v: self._update_create(), font=FONTS["body_small"], height=24,
+            fg_color=COLORS["bg_card"], selected_color=COLORS["accent_primary"],
+            selected_hover_color=COLORS["accent_primary"], unselected_color=COLORS["bg_card"],
+            unselected_hover_color=COLORS["border"], text_color=COLORS["text_primary"])
+        self._trim_seg.pack(anchor="w", pady=(4, 2))
+        self._trim_hint = _small(self._trim_box, "", COLORS["text_muted"], anchor="w", justify="left",
+                                 wraplength=380)
+        self._trim_hint.pack(anchor="w")
+        self._custom_list = ctk.CTkFrame(self._trim_box, fg_color="transparent")
+        self._custom_list.pack(fill="x", pady=(2, 0))
+
+        # 2. remove background music & noise
+        self.clean_on = ctk.BooleanVar(value=False)
+        self._switch(prep, "Remove background music & noise", self.clean_on,
+                     self._update_create).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self._clean_box = ctk.CTkFrame(prep, fg_color="transparent")
+        self._clean_box.grid(row=3, column=0, sticky="ew", padx=(42, 0))
+        self.denoise_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(self._clean_box, text="Also reduce steady noise (hiss, hum)", variable=self.denoise_var,
+                        font=FONTS["body_small"], text_color=COLORS["text_secondary"],
+                        fg_color=COLORS["accent_primary"], hover_color=COLORS["accent_secondary"],
+                        border_color=COLORS["border"], checkbox_width=16, checkbox_height=16,
+                        command=self._update_create).pack(anchor="w", pady=(4, 2))
+        row = ctk.CTkFrame(self._clean_box, fg_color="transparent")
+        row.pack(anchor="w", pady=(2, 0))
+        self._cleanup_btn = _btn(row, "🎧  Preview cleanup", self._on_preview_cleanup,
+                                 COLORS["accent_primary"], width=150)
+        self._cleanup_btn.pack(side="left", padx=(0, 6))
+        self._play_orig_btn = _btn(row, "▶ Original", lambda: self._play_preview(0), COLORS["text_muted"],
+                                   width=90, state="disabled")
+        self._play_orig_btn.pack(side="left", padx=(0, 6))
+        self._play_clean_btn = _btn(row, "▶ Cleaned", lambda: self._play_preview(1), COLORS["success"],
+                                    width=90, state="disabled")
+        self._play_clean_btn.pack(side="left")
+        _small(self._clean_box, "Separates the voice from music with Demucs. The first use downloads "
+                                "the model (about 80 MB).", COLORS["text_muted"], anchor="w", justify="left",
+               wraplength=380).pack(anchor="w", pady=(4, 0))
+
+        # 3. skip silences (applied last, to the trimmed / cleaned audio)
+        self.skipsil_on = ctk.BooleanVar(value=False)
+        self._switch(prep, "Skip silences", self.skipsil_on,
+                     self._update_create).grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self._skipsil_hint = _small(prep, "Applied last: removes pauses longer than 0.4 s from the "
+                                          "trimmed and cleaned audio.", COLORS["text_muted"],
+                                    anchor="w", justify="left", wraplength=380)
+        self._skipsil_hint.grid(row=5, column=0, sticky="w", padx=(42, 0))
+
+    # ── clip selection logic ───────────────────────────────────────
+    def _selections(self):
+        """[{"path", "start", "end"}] that cloning will use, given the trim options.
+
+        "First N s" counts recording time from the start of the first clip and
+        continues into the next clips until N seconds are covered.
+        """
+        clips = self._clips
+        mode = self._mode_var.get()
+        if not self.trim_on.get() or mode not in TRIM_PRESETS:
+            return [{"path": c["path"]} for c in clips]
+        limit = TRIM_PRESETS[mode].get(self.trim_var.get())
+        if limit is None:                                       # Custom
+            return [{"path": c["path"], "start": c.get("start"), "end": c.get("end")} for c in clips]
+        out, left = [], float(limit)
+        for c in clips:
+            if left <= 0.05:
+                break
+            take = min(left, c["seconds"])
+            out.append({"path": c["path"]} if take >= c["seconds"] - 0.01
+                       else {"path": c["path"], "start": 0.0, "end": round(take, 3)})
+            left -= take
+        return out
+
+    def _sel_seconds(self, sel, full):
+        start = sel.get("start") or 0.0
+        end = sel.get("end") if sel.get("end") is not None else full
+        return max(0.0, end - start)
+
+    def _clip_seconds(self):
+        """Seconds of audio cloning will use (after the trim options)."""
+        full = {c["path"]: c["seconds"] for c in self._clips}
+        return sum(self._sel_seconds(s, full[s["path"]]) for s in self._selections())
+
+    def _prep_options(self):
+        mode = self._mode_var.get()
+        trim = None
+        if self.trim_on.get() and mode in TRIM_PRESETS:
+            limit = TRIM_PRESETS[mode].get(self.trim_var.get())
+            trim = "custom" if limit is None else f"first{limit}"
+        return {"trim": trim, "separate": bool(self.clean_on.get()), "denoise": bool(self.denoise_var.get()),
+                "skip_silences": bool(self.skipsil_on.get())}
+
+    def _refresh_prep(self, mode):
+        """Show / hide the prep options for the current mode and selection."""
+        if mode == "Import model":
+            self._prep.grid_remove()
+            return
+        self._prep.grid()
+        presets = list(TRIM_PRESETS[mode])
+        if self._trim_seg.cget("values") != presets:
+            self._trim_seg.configure(values=presets)
+        if self.trim_var.get() not in presets:
+            self.trim_var.set(presets[1])
+        (self._trim_box.grid if self.trim_on.get() else self._trim_box.grid_remove)()
+        (self._clean_box.grid if self.clean_on.get() else self._clean_box.grid_remove)()
+        (self._skipsil_hint.grid if self.skipsil_on.get() else self._skipsil_hint.grid_remove)()
+        custom = self.trim_on.get() and TRIM_PRESETS[mode].get(self.trim_var.get()) is None
+        if custom:
+            self._trim_hint.configure(text="Pick the part of each recording to use. Press ✂ Edit to open "
+                                           "its timeline." + (" Quick mode reads at most 25 s of speech, "
+                                                              "so keep the selections short."
+                                                              if mode == "Quick" else ""))
+        else:
+            self._trim_hint.configure(text="Uses the start of the recordings, continuing into the next "
+                                           "clip if one is shorter." + (" Quick mode reads at most 25 s."
+                                                                        if mode == "Quick" else ""))
+        for w in self._custom_list.winfo_children():
+            w.destroy()
+        if custom:
+            for i, c in enumerate(self._clips):
+                r = ctk.CTkFrame(self._custom_list, fg_color=COLORS["bg_card"], corner_radius=8)
+                r.pack(fill="x", pady=2)
+                name = os.path.basename(c["path"])
+                _small(r, name if len(name) <= 28 else name[:25] + "…", COLORS["text_primary"],
+                       anchor="w", width=190).pack(side="left", padx=(8, 4), pady=4)
+                s0 = c.get("start") or 0.0
+                e0 = c.get("end") if c.get("end") is not None else c["seconds"]
+                whole = c.get("start") is None and c.get("end") is None
+                txt = (f"all · {self._fmt_len(c['seconds'])}" if whole else
+                       f"{self._clock(s0)}–{self._clock(e0)} · {e0 - s0:.1f} s")
+                _small(r, txt, COLORS["text_secondary"] if whole else COLORS["success"]).pack(side="left")
+                ctk.CTkButton(r, text="✂  Edit", font=FONTS["body_small"], width=70, height=24,
+                              corner_radius=6, fg_color=COLORS["bg_input"], hover_color=COLORS["accent_primary"],
+                              border_color=COLORS["accent_primary"], border_width=1,
+                              command=lambda i=i: self._edit_clip(i)).pack(side="right", padx=6, pady=3)
+        self._cleanup_btn.configure(state="normal" if self._clips and not self._busy else "disabled")
+
+    @staticmethod
+    def _clock(t):
+        m, s = divmod(int(round(t)), 60)
+        return f"{m}:{s:02d}"
+
+    def _edit_clip(self, i):
+        from ui.panels.timeline_dialog import TimelineDialog
+        c = self._clips[i]
+        mode = self._mode_var.get()
+        quick = (10, 20, 25) if mode == "Quick" else (30, 60, 120)
+
+        def done(start, end, duration):
+            c["start"], c["end"] = start, end
+            c["seconds"] = round(duration, 2)
+            self._cleanup_preview = None
+            self._update_create()
+        TimelineDialog(self.app, c["path"], c.get("start"), c.get("end"), on_done=done, quick_lengths=quick)
 
     def _menu(self, parent, var, values, width):
         return ctk.CTkOptionMenu(parent, variable=var, values=values, command=lambda v: self._update_create(),
@@ -341,7 +532,14 @@ class CloneVoiceGroup:
                 f"21 GB on {os.path.splitdrive(st['root'])[0] or 'disk'}. Large downloads can take an hour; "
                 "you can keep using the app meanwhile."))
         else:
-            self._set_status(f"Ready · {len(voices)} voice{'s' if len(voices) != 1 else ''}", COLORS["success"])
+            outdated = [e["label"] for e in st["engines"].values() if e.get("needs_update")]
+            if outdated:
+                self._set_status("Update available", COLORS["warning"])
+                self._update_btn.pack(side="right", padx=(0, 8))
+            else:
+                self._set_status(f"Ready · {len(voices)} voice{'s' if len(voices) != 1 else ''}",
+                                 COLORS["success"])
+                self._update_btn.pack_forget()
         if installed:
             self._setup.grid_remove()
             self._tabs.grid()
@@ -516,9 +714,6 @@ class CloneVoiceGroup:
             pass
 
     # ── create page state ──────────────────────────────────────────
-    def _clip_seconds(self):
-        return sum(s for _, s in self._clips)
-
     def _engine_selection(self):
         try:
             return self.app._engine_panel.get_voice_selection()
@@ -603,6 +798,7 @@ class CloneVoiceGroup:
         from ui.panels.engine_panel import EnginePanel
         sel = self._engine_selection()
         self._base_label.configure(text=f"Base: {EnginePanel.describe_selection(sel)}" if sel else "")
+        self._refresh_prep(mode)
 
         secs = self._clip_seconds()
         n = len(self._clips)
@@ -620,7 +816,10 @@ class CloneVoiceGroup:
             elif secs < 180:
                 color, note = COLORS["warning"], "under 3 min: expect rough results"
         if mode != "Import model":
-            txt = "No clips" if not n else f"{n} clip{'s' if n != 1 else ''} · {self._fmt_len(secs)}"
+            total = sum(c["seconds"] for c in self._clips)
+            used = "" if abs(total - secs) < 0.05 else f" (using {self._fmt_len(secs)})"
+            txt = ("No clips" if not n else
+                   f"{n} clip{'s' if n != 1 else ''} · {self._fmt_len(total)}{used}")
             self._clips_label.configure(text=txt + (f"  ({note})" if note and n else ""),
                                         text_color=color if n else COLORS["text_muted"])
         else:
@@ -643,6 +842,15 @@ class CloneVoiceGroup:
                 est = "Add clips to see an estimated time."
         else:
             est = "⏱  Estimated time: about 15 s." if self._pth else ""
+        if est and mode != "Import model" and n and self.clean_on.get():
+            warm = False
+            try:
+                from core.voice_cloning import get_client
+                warm = get_client().is_warm("rvc")
+            except Exception:
+                pass
+            extra = estimate.separation_seconds(secs, first_use=not warm)
+            est += f" Music removal adds {estimate.fmt(extra)}."
         self._create_est.configure(text=est)
         name_ok = bool(self._name_entry.get().strip())
         self._create_btn.configure(state="normal" if ok and name_ok and not self._busy else "disabled")
@@ -657,21 +865,23 @@ class CloneVoiceGroup:
                                             filetypes=AUDIO_TYPES)
         if not paths:
             return
-        known = {p for p, _ in self._clips}
+        known = {c["path"] for c in self._clips}
         for p in paths:
             if p in known:
                 continue
             try:
-                self._clips.append((p, library.audio_seconds(p)))
+                self._clips.append({"path": p, "seconds": round(library.audio_seconds(p), 2),
+                                    "start": None, "end": None})
             except Exception as e:
                 messagebox.showwarning("Clip skipped", f"Could not read {os.path.basename(p)}:\n{e}",
                                        parent=self.app)
         if not self._name_entry.get().strip() and self._clips:
-            self._name_entry.insert(0, os.path.splitext(os.path.basename(self._clips[0][0]))[0][:40])
+            self._name_entry.insert(0, os.path.splitext(os.path.basename(self._clips[0]["path"]))[0][:40])
         self._update_create()
 
     def _on_clear_clips(self):
         self._clips = []
+        self._cleanup_preview = None
         self._update_create()
 
     def _on_pick_pth(self):
@@ -717,7 +927,8 @@ class CloneVoiceGroup:
         self.app.after(keep_seconds * 1000, lambda: (not self._busy) and self._task.grid_remove())
 
     def _set_progress(self, frac, text=None):
-        self._progress.set(max(0.0, min(1.0, float(frac))))
+        if frac is not None:
+            self._progress.set(max(0.0, min(1.0, float(frac))))
         if text:
             self._stage.configure(text=text)
 
@@ -796,6 +1007,23 @@ class CloneVoiceGroup:
             return "✅  Voice cloning is installed"
         self._run("Install", "Starting install…", work)
 
+    def _on_update(self):
+        st = runtime.status()
+        outdated = [n for n, e in st["engines"].items() if e.get("needs_update")]
+        if not outdated or not messagebox.askyesno(
+                "Update voice cloning",
+                "This version adds packages to the voice-cloning runtime (for example music "
+                "removal). The update installs only what is missing, usually a small download, then "
+                "re-checks the engines. Continue?", parent=self.app):
+            return
+
+        def work():
+            runtime.install(engines=tuple(outdated),
+                            progress_cb=lambda f, m: self._ui(self._set_progress, f, m),
+                            log_cb=lambda line: None, cancel_event=self._cancel)
+            return "✅  Voice cloning is up to date"
+        self._run("Update", "Updating…", work)
+
     def _on_create(self):
         name = self._name_entry.get().strip()[:40]
         mode = self._mode_var.get()
@@ -807,12 +1035,13 @@ class CloneVoiceGroup:
             pth, index = self._pth, self._index
             self._run("Import", "Checking the model…", lambda: self._do_import(name, pth, index))
             return
-        clips = [p for p, _ in self._clips]
+        clips = self._selections()
+        prep = self._prep_options()
         eng, voice, eng_settings = self._base_voice()
         base_sel = self._engine_selection()      # restored when the voice is switched on
         if mode == "Quick":
             self._run("Create voice", "Preparing the reference voice…",
-                      lambda: self._do_quick(name, clips, eng, voice, base_sel))
+                      lambda: self._do_quick(name, clips, eng, voice, base_sel, prep))
         else:
             if self.app._is_generating:
                 messagebox.showinfo("Busy", "Wait for the current generation to finish, then start training.",
@@ -821,12 +1050,13 @@ class CloneVoiceGroup:
             opts = dict(epochs=int(round(self.epochs_var.get())), batch_size=int(self.batch_var.get()),
                         sample_rate=SR_CHOICES[self.sr_var.get()], match=bool(self.match_var.get()))
             self._run("Training", "Starting…",
-                      lambda: self._do_train(name, clips, eng, voice, eng_settings, opts, base_sel))
+                      lambda: self._do_train(name, clips, eng, voice, eng_settings, opts, base_sel, prep))
 
     def _finish_new_voice(self, p, msg):
         def ui():
             self.app.refresh_cloned_voices(select=p.slug)
             self._clips, self._pth, self._index = [], None, None
+            self._cleanup_preview = None
             self._name_entry.delete(0, "end")
             self._pth_label.configure(text="No file", text_color=COLORS["text_muted"])
             self._index_label.configure(text="Optional", text_color=COLORS["text_muted"])
@@ -836,9 +1066,33 @@ class CloneVoiceGroup:
         self._ui(ui)
         return f"✅  {msg}"
 
-    def _do_quick(self, name, clips, eng, voice, base_sel=None):
-        p = library.create_voice(name, "seedvc", clips, eng, voice, base_selection=base_sel)
+    def _prepare(self, p, prep, lo=0.0, hi=0.3):
+        """Trim and/or clean the clips before cloning (no-op when both are off)."""
+        if not prep or not (prep.get("trim") or prep.get("separate") or prep.get("skip_silences")):
+            return p
+        separate_fn = None
+        if prep.get("separate"):
+            from core.voice_cloning import get_client
+            client = get_client()
+
+            def separate_fn(src, dst, denoise):
+                client.separate(src, dst, denoise=denoise, cancel_event=self._cancel,
+                                status_cb=lambda m: self._ui(self._set_progress, None, m))
+        t0 = time.monotonic()
+        est = estimate.separation_seconds(p.total_seconds) if separate_fn else 2
+
+        def progress(frac, msg):
+            left = max(0.0, est - (time.monotonic() - t0))
+            self._ui(self._set_progress, lo + (hi - lo) * frac,
+                     f"{msg} · {estimate.fmt(left)} left" if separate_fn and frac < 1 else msg)
+        return library.prepare_clips(p, separate_fn=separate_fn, denoise=prep.get("denoise", False),
+                                     progress_cb=progress, check_cancel=self._check_cancel,
+                                     skip_silences=prep.get("skip_silences", False))
+
+    def _do_quick(self, name, clips, eng, voice, base_sel=None, prep=None):
+        p = library.create_voice(name, "seedvc", clips, eng, voice, base_selection=base_sel, prep=prep)
         try:
+            p = self._prepare(p, prep, 0.0, 0.8)
             self._ui(self._set_progress, 0.3, "Trimming silence and building the reference…")
             library.build_seedvc_reference(p)
             self._check_cancel()
@@ -855,12 +1109,13 @@ class CloneVoiceGroup:
         p = library.import_rvc_model(name, pth, index, info)
         return self._finish_new_voice(p, f"Voice '{name}' imported ({info['sample_rate'] // 1000} kHz model).")
 
-    def _do_train(self, name, clips, eng, voice, eng_settings, opts, base_sel=None):
+    def _do_train(self, name, clips, eng, voice, eng_settings, opts, base_sel=None, prep=None):
         from core.voice_cloning import get_client
-        p = library.create_voice(name, "rvc", clips, eng, voice, base_selection=base_sel)
+        p = library.create_voice(name, "rvc", clips, eng, voice, base_selection=base_sel, prep=prep)
         t0 = time.monotonic()
         est = estimate.training_seconds(p.total_seconds, opts["epochs"], opts["batch_size"], opts["sample_rate"])
         try:
+            p = self._prepare(p, prep, 0.0, 0.02)
             if opts["match"] and eng_settings:
                 self._ui(self._set_progress, 0.01, "Measuring pitch of the base and target voices…")
                 tmp = self._new_tmp()
@@ -869,7 +1124,7 @@ class CloneVoiceGroup:
                 os.makedirs(os.path.dirname(base_wav), exist_ok=True)
                 import soundfile as sf
                 sf.write(base_wav, y, sr)
-                r = pitch.estimate_offset(base_wav, [str(p.dir / c["path"]) for c in p.clips])
+                r = pitch.estimate_offset(base_wav, library.clip_audio_paths(p))
                 self._check_cancel()
                 p = library.update_params(p.slug, pitch=r["offset"], base_f0_hz=r["base_f0"],
                                           target_f0_hz=r["target_f0"])
@@ -924,7 +1179,7 @@ class CloneVoiceGroup:
             import soundfile as sf
             sf.write(base_wav, y, sr)
             self._ui(self._set_progress, 0.4, "Measuring pitch…")
-            r = pitch.estimate_offset(base_wav, [str(p.dir / c["path"]) for c in p.clips])
+            r = pitch.estimate_offset(base_wav, library.clip_audio_paths(p))
             self._check_cancel()
             library.update_params(p.slug, pitch=r["offset"], base_f0_hz=r["base_f0"],
                                   target_f0_hz=r["target_f0"])
@@ -958,6 +1213,42 @@ class CloneVoiceGroup:
             self._ui(self._play, path)
             return f"▶  Playing preview of '{p.name}'"
         self._run("Preview", "Starting…", work)
+
+    def _on_preview_cleanup(self):
+        sels = self._selections()
+        if not sels:
+            return
+        first = dict(sels[0])
+        full = next(c["seconds"] for c in self._clips if c["path"] == first["path"])
+        start = first.get("start") or 0.0
+        end = first.get("end") if first.get("end") is not None else full
+        end = min(end, start + 30.0)                 # preview at most 30 s
+        denoise = bool(self.denoise_var.get())
+
+        def work():
+            from core.audio_io import load_segment
+            from core.voice_cloning import get_client
+            tmp = self._new_tmp()
+            orig = os.path.join(tmp, "original.wav")
+            load_segment(first["path"])[int(start * 1000):int(end * 1000)].export(orig, format="wav")
+            self._check_cancel()
+            res = get_client().separate(orig, os.path.join(tmp, "cleaned.wav"), denoise=denoise,
+                                        cancel_event=self._cancel,
+                                        status_cb=lambda m: self._ui(self._set_progress, 0.3, m))
+            self._cleanup_preview = (orig, res["out"])
+
+            def ui():
+                self._play_orig_btn.configure(state="normal")
+                self._play_clean_btn.configure(state="normal")
+                self._play(res["out"])
+            self._ui(ui)
+            return (f"▶  Playing the cleaned audio ({end - start:.0f} s, music removed in "
+                    f"{res['elapsed']:.0f} s). Compare with ▶ Original.")
+        self._run("Cleanup preview", "Removing background music from a sample…", work)
+
+    def _play_preview(self, which):
+        if self._cleanup_preview:
+            self._play(self._cleanup_preview[which])
 
     def _play(self, path):
         try:

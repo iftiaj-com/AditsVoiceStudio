@@ -70,3 +70,7 @@ vc_runtime_data/
 # Partial downloads and interrupted atomic writes (profile.json.tmp, runtime.json.tmp)
 *.part
 *.tmp
+
+# Self-test reports (tts_app.py --selftest <report.json>)
+selftest*.json
+report.json
