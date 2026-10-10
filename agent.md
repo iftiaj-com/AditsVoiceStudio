@@ -56,6 +56,7 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `    ├── client.py` | Worker Client | `VCClient`: one worker per (engine, role), JSON-lines requests, cancel, GPU policy. |
 | `    ├── library.py` | Voice Library | `VoiceProfile` and the `voices/<slug>/` folders: create, import, rename, delete. |
 | `    ├── pitch.py` | Pitch Matching | Median F0 of the base and target voices, semitone offset. |
+| `    ├── voicematch.py` | Voice Match | Self-maintaining voice bank of English engine voices (engine fingerprints, retries), clip analysis, shortlist. |
 | `    ├── estimate.py` | Time Estimates | Training and conversion time estimates shown in the UI. |
 | `    └── errors.py` | Exceptions | `VCNotInstalled`, `VCBusy`, `VCCancelled`, `VCWorkerError`, `InstallError`. |
 | **`engines/`** | Directory | Contains abstract interfaces and concrete adapters for various TTS engines. |
@@ -81,6 +82,7 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
 | `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
 | `    ├── clone_voice_dialog.py` | GUI Widget | Rename / delete window opened by the ✏️ button in the Cloned Voices header. |
+| `    ├── analyzer_dialog.py` | GUI Widget | Voice match: one run (bank update, clip analysis, test-clone), ranked Best / Close matches with ▶ Sample / ▶ Result toggles and Apply. |
 | `    ├── record_dialog.py` | GUI Widget | Microphone recorder for clone clips: device picker, level meter, live waveform, preview with seek, Add to clips. |
 | `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
@@ -344,7 +346,8 @@ There are three ways to make a voice:
   microphone (default host API, default device first), record with a live level
   meter and waveform (auto-stop at 10 minutes), then preview with ▶/⏸, a seek
   slider or a click on the waveform, and **Add to clips**, **Record again** or
-  **Discard**. Takes are 16-bit mono WAV in `<root>ecordings\` (gitignored with
+  **Discard**. Takes are 16-bit mono WAV in `<root>
+ecordings\` (gitignored with
   the runtime root) and become normal clips, so trim and cleanup apply to them.
   Capture uses PyAudio (`requirements.txt`, and `_REQUIRED` in `build_exe.py`).
 * **Base voice.** A clone sounds best when converted from the engine voice it was
@@ -407,6 +410,57 @@ When `vc_runtime/requirements-<engine>.txt` changes, `runtime.needs_update()`
 compares it with the manifest and the Clone Voice header shows **⬆ Update**,
 which re-runs `install()` for that engine only (33 s here; pip skips what is
 present).
+
+### Voice match (🔍 Analyze)
+
+Clickable once a clip is added, between Record and Clear. One click runs
+everything and shows the result: the English engine voice that clones best
+from the clip, to use as the base voice.
+
+1. **Voice bank update.** Every English local voice (Kokoro American and
+   British, MeloTTS English accents, Piper, English system voices; 36 here) has
+   a sample of `voicematch.SENTENCES["en"]` at speed 1.0 in
+   `<root>\voice_bank\`, with its CAMPPlus voiceprint (Seed-VC worker
+   `cmd: "embed"`, CPU), median F0 and articulation rate. Only what changed is
+   redone, automatically:
+   * a voice not in the bank yet (new system voice, new Kokoro voice);
+   * a voice whose engine fingerprint changed (`engine_fingerprint()`: engine
+     package versions, Kokoro's model and voice-pack files, each Piper model
+     file, the system voice id), so an engine update re-samples only that engine;
+   * a voice that failed under an older app version (retried once per
+     `core.version.__version__`; a failure in the current version is not retried).
+   Voices no longer offered are pruned. Entries from before fingerprints existed
+   adopt the current one instead of being rebuilt. There is no manual rebuild.
+2. **Clip analysis** of the selected audio (after trim, and after music removal
+   when that is on), up to 60 s: pitch with a rough gender guess, speaking
+   speed and language (faster-whisper, `core.subtitles.get_whisper_model`), and
+   voiceprint.
+3. **Shortlist:** the 3 voices with the highest voiceprint similarity minus
+   0.015 per semitone of pitch difference.
+4. **Test-clone and rank:** each shortlisted sample is converted with Seed-VC,
+   using the clip (silences removed, 25 s) as the reference, and the result's
+   voiceprint is compared with the clip. Rows are ordered by that score:
+   **1. Best match**, then **2.** and **3. Close match**. If the test-clone is
+   not possible (for example while a voice trains), the shortlist order is kept
+   and the window says so.
+
+Each row shows pitch against the clip and a suggested speed (Kokoro / Melo
+speed, pyttsx3 WPM) so the voice talks at the clip's pace. **▶ Sample** plays
+the engine voice and **▶ Result** its cloned test; both are play / stop toggles
+on one channel. **Apply** calls `EnginePanel.apply_voice_selection()` and closes
+the window; the controls stay editable.
+
+Measured on the Arjun clip (bank already built): about 2.3 minutes per run.
+Test-clone scores were 0.88 to 0.91 against 0.60 to 0.70 before cloning. Seed-VC
+is not deterministic, so near-equal candidates can swap places between runs.
+
+* English only by design; the window warns when Whisper hears another language.
+* MeloTTS French fails in the app venv (its BERT checkpoint needs torch 2.6+)
+  and Kokoro Chinese fails (espeak has no "zh"). Both predate this feature, so
+  the bank skips non-English voices rather than download gigabytes onto C:.
+* Seed-VC's backend sets `HF_HUB_CACHE` to `seed-vc\checkpoints\hf_cache` at
+  start. Without it, running `embed` before `convert` made huggingface_hub use
+  `$HF_HOME`, and the conversion models were downloaded a second time.
 
 ### Architecture
 

@@ -191,6 +191,8 @@ def main():
                     result = backend.train(req, ctx)
                 elif cmd == "separate" and args.engine == "rvc":
                     result = backend.separate(req, ctx)
+                elif cmd == "embed" and args.engine == "seedvc":
+                    result = backend.embed(req, ctx)
                 else:
                     raise TaskError("generic", f"Unsupported command {cmd!r} for {args.engine}")
             emit({"id": rid, "event": "done", "result": result})

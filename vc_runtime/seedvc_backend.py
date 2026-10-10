@@ -44,6 +44,11 @@ def _crossfade(chunk1, chunk2, overlap):
 class SeedVcBackend:
     def __init__(self, repo):
         self.repo = repo
+        # inference.py sets HF_HUB_CACHE to ./checkpoints/hf_cache when it is
+        # imported, but huggingface_hub reads it once, at its own import. The
+        # voiceprint command imports huggingface_hub first, so without this the
+        # conversion models were looked up in $HF_HOME and downloaded again.
+        os.environ["HF_HUB_CACHE"] = os.path.join(os.path.abspath(repo), "checkpoints", "hf_cache")
         self._models = None
         self._ref_key = None
         self._ref = None
@@ -61,6 +66,54 @@ class SeedVcBackend:
         self.device = svc.device
         self._models = dict(model=model, semantic_fn=semantic_fn, vocoder_fn=vocoder_fn,
                             campplus=campplus, to_mel=to_mel, sr=mel_args["sampling_rate"])
+
+    def _campplus(self):
+        """The CAMPPlus speaker model only (192-dim voiceprints), on the CPU.
+
+        Seed-VC uses it for its style vector; here it powers the voice-match
+        analyzer. It is small, so the CPU keeps the GPU free for conversion.
+        """
+        if getattr(self, "_cam", None) is None:
+            import torch
+            from hf_utils import load_custom_model_from_hf
+            from modules.campplus.DTDNN import CAMPPlus
+            path = load_custom_model_from_hf("funasr/campplus", "campplus_cn_common.bin", config_filename=None)
+            model = CAMPPlus(feat_dim=80, embedding_size=192)
+            model.load_state_dict(torch.load(path, map_location="cpu"))
+            self._cam = model.eval()
+        return self._cam
+
+    def embed(self, req, ctx):
+        """Voiceprints for req["files"]: L2-normalised 192-dim vectors (None for unreadable files).
+
+        Same features as inference.py: 16 kHz mono, 80-bin Kaldi fbank, mean-normalised.
+        """
+        import librosa
+        import torch
+        import torchaudio
+        files = list(req.get("files") or [])
+        model = self._campplus()
+        out = []
+        for i, path in enumerate(files):
+            ctx.check_cancel()
+            if i % 5 == 0:
+                ctx.progress("embed", i / max(1, len(files)), f"Measuring voices {i + 1}/{len(files)}…")
+            try:
+                y = librosa.load(path, sr=16000, mono=True)[0][: 16000 * 60]
+                if y.size < 16000 // 2:
+                    out.append(None)
+                    continue
+                wave = torch.from_numpy(y).float().unsqueeze(0)
+                feat = torchaudio.compliance.kaldi.fbank(wave, num_mel_bins=80, dither=0, sample_frequency=16000)
+                feat = feat - feat.mean(dim=0, keepdim=True)
+                with torch.no_grad():
+                    emb = model(feat.unsqueeze(0))[0]
+                emb = emb / emb.norm().clamp_min(1e-8)
+                out.append([round(float(v), 6) for v in emb.tolist()])
+            except Exception as e:
+                print(f"embed failed for {path}: {e}", flush=True)
+                out.append(None)
+        return {"embeddings": out}
 
     def selfcheck(self):
         import torch

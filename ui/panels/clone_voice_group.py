@@ -262,6 +262,9 @@ class CloneVoiceGroup:
              width=110).pack(side="left", padx=(0, 6))
         self._record_btn = _btn(clip_btns, "🎙  Record", self._on_record, COLORS["accent_secondary"], width=100)
         self._record_btn.pack(side="left", padx=(0, 6))
+        self._analyze_btn = _btn(clip_btns, "🔍  Analyze", self._on_analyze, COLORS["success"], width=104,
+                                 state="disabled")
+        self._analyze_btn.pack(side="left", padx=(0, 6))
         _btn(clip_btns, "✖  Clear", self._on_clear_clips, COLORS["error"],
              width=80).pack(side="left")
         self._clips_label = _small(self._clips_row, "No clips", COLORS["text_muted"], anchor="w")
@@ -474,6 +477,7 @@ class CloneVoiceGroup:
                               border_color=COLORS["accent_primary"], border_width=1,
                               command=lambda i=i: self._edit_clip(i)).pack(side="right", padx=6, pady=3)
         self._cleanup_btn.configure(state="normal" if self._clips and not self._busy else "disabled")
+        self._analyze_btn.configure(state="normal" if self._clips and not self._busy else "disabled")
 
     @staticmethod
     def _clock(t):
@@ -898,6 +902,19 @@ class CloneVoiceGroup:
             self._cleanup_preview = None
             self._update_create()
         self._recorder = RecordDialog(self.app, str(runtime.runtime_root() / "recordings"), on_done=done)
+
+    def _on_analyze(self):
+        """Voice match: rank engine voices by how close they sound to the selected clip audio."""
+        from ui.panels.analyzer_dialog import AnalyzerDialog
+        win = getattr(self, "_analyzer", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+        if not self._clips:
+            return
+        self._analyzer = AnalyzerDialog(self.app, self._selections(), clean=bool(self.clean_on.get()),
+                                        denoise=bool(self.denoise_var.get()),
+                                        on_applied=lambda sel: self._update_create())
 
     def _on_clear_clips(self):
         self._clips = []

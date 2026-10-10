@@ -26,6 +26,12 @@ import uuid
 from core.voice_cloning import runtime
 from core.voice_cloning.errors import VCBusy, VCCancelled, VCNotInstalled, VCWorkerError
 
+def _abs(path):
+    """Workers run with the upstream repo as cwd, so every path sent must be absolute."""
+    import os
+    return os.path.abspath(str(path)) if path else path
+
+
 _CANCEL_GRACE = 8.0      # seconds a worker gets to report a cancel before it is killed
 _READY_TIMEOUT = 90.0
 
@@ -233,10 +239,10 @@ class VCClient:
             w = _Worker("rvc", "inspect", 30)
             w.start()
             try:
-                return w.request({"cmd": "inspect", "pth": str(pth)}, timeout=120)
+                return w.request({"cmd": "inspect", "pth": _abs(pth)}, timeout=120)
             finally:
                 w.shutdown()
-        return self._worker("rvc", "convert").request({"cmd": "inspect", "pth": str(pth)}, timeout=120)
+        return self._worker("rvc", "convert").request({"cmd": "inspect", "pth": _abs(pth)}, timeout=120)
 
     def convert(self, profile, in_wav, out_wav, *, pitch=None, index_rate=None, protect=None,
                 diffusion_steps=None, cancel_event=None, status_cb=None) -> dict:
@@ -246,13 +252,13 @@ class VCClient:
         if not profile.is_ready:
             raise VCWorkerError("not_found", f"Voice '{profile.name}' is not ready ({profile.status}).")
         if profile.mode == "rvc":
-            payload = {"cmd": "convert", "in": str(in_wav), "out": str(out_wav),
+            payload = {"cmd": "convert", "in": _abs(in_wav), "out": _abs(out_wav),
                        "pth": profile.pth_abs, "index": profile.index_abs,
                        "pitch": int(profile.pitch if pitch is None else pitch),
                        "index_rate": float(profile.index_rate if index_rate is None else index_rate),
                        "protect": float(profile.protect if protect is None else protect)}
         else:
-            payload = {"cmd": "convert", "in": str(in_wav), "out": str(out_wav),
+            payload = {"cmd": "convert", "in": _abs(in_wav), "out": _abs(out_wav),
                        "ref": profile.reference_abs,
                        "diffusion_steps": int(profile.diffusion_steps if diffusion_steps is None
                                               else diffusion_steps)}
@@ -279,8 +285,35 @@ class VCClient:
                 status_cb(ev["message"])
 
         w = self._worker("rvc", "convert")
-        return w.request({"cmd": "separate", "in": str(in_wav), "out": str(out_wav),
+        return w.request({"cmd": "separate", "in": _abs(in_wav), "out": _abs(out_wav),
                           "denoise": bool(denoise)},
+                         cancel_event=cancel_event, on_event=on_event)
+
+    def embed(self, files, *, cancel_event=None, status_cb=None) -> list:
+        """CAMPPlus voiceprints (lists of 192 floats, or None) for audio files. CPU only."""
+        def on_event(ev):
+            if status_cb and ev.get("event") == "progress" and ev.get("message"):
+                status_cb(ev["message"])
+        w = self._worker("seedvc", "convert")
+        res = w.request({"cmd": "embed", "files": [_abs(f) for f in files]},
+                        cancel_event=cancel_event, on_event=on_event)
+        return res.get("embeddings") or []
+
+    def convert_reference(self, in_wav, ref_wav, out_wav, *, diffusion_steps=10, cancel_event=None,
+                          status_cb=None) -> dict:
+        """Zero-shot (Seed-VC) conversion against a reference file, without a saved voice.
+
+        Used by the analyzer's audition, before any voice exists.
+        """
+        if self.training_active:
+            raise VCBusy("A voice is being trained, so auditions are unavailable until it finishes.")
+
+        def on_event(ev):
+            if status_cb and ev.get("event") == "progress" and ev.get("message"):
+                status_cb(ev["message"])
+        w = self._worker("seedvc", "convert")
+        return w.request({"cmd": "convert", "in": _abs(in_wav), "ref": _abs(ref_wav), "out": _abs(out_wav),
+                          "diffusion_steps": int(diffusion_steps)},
                          cancel_event=cancel_event, on_event=on_event)
 
     def train_rvc(self, profile, dataset_dir, *, epochs=150, batch_size=2, sample_rate=40000,
@@ -302,7 +335,7 @@ class VCClient:
                 elif ev.get("event") == "log" and log_cb:
                     log_cb(ev.get("line", ""))
 
-            payload = {"cmd": "train", "model_name": profile.slug, "dataset_dir": str(dataset_dir),
+            payload = {"cmd": "train", "model_name": profile.slug, "dataset_dir": _abs(dataset_dir),
                        "out_dir": str(profile.dir / "model"), "sample_rate": int(sample_rate),
                        "epochs": int(epochs), "batch_size": int(batch_size),
                        "save_every_epoch": int(save_every_epoch), "fresh": bool(fresh),
