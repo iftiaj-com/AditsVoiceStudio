@@ -159,7 +159,7 @@ EFFECTS_REGISTRY = [
     },
     {
         "key":    "melancholic",
-        "label":  "🌧️  Melancholic",
+        "label":  "🌧  Melancholic",
         "desc":   "Slow intimate muffled",
         "fn":     AudioEffects.melancholic,
     },

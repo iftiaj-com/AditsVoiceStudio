@@ -376,6 +376,7 @@ def build(args):
         print(f"[*] Warning: Could not locate NLTK data directory: {e}")
 
     _bundle_vc_runtime(command)
+    _add(command, str(BASE_DIR / "assets"), "assets")
 
     command.append(str(BASE_DIR / "tts_app.py"))
 

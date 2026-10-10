@@ -62,6 +62,13 @@ scratch/
 Voices-training/
 test_*.py
 test_*.wav
+tools/process_logo.py
+tools/process_*.py
+
+# AI Agent directories & configs
+.claude/
+.gemini/
+.agents/
 
 # Voice cloning runtime (venvs, Applio, seed-vc, voices) - see agent.md
 vc_runtime_data/

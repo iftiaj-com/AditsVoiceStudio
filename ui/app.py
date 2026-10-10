@@ -27,6 +27,7 @@ if sys.stderr is None:
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
+from PIL import Image
 import numpy as np
 import pygame
 import torch
@@ -69,6 +70,17 @@ class TTSStudioApp(ctk.CTk):
         self.configure(fg_color=COLORS["bg_dark"])
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+
+        # Window & taskbar icon
+        ico_file = paths.bundle_dir() / "assets" / "voicecraft.ico"
+        if ico_file.exists():
+            try:
+                self.iconbitmap(default=str(ico_file))
+            except Exception:
+                try:
+                    self.iconbitmap(str(ico_file))
+                except Exception:
+                    pass
 
         # State
         self._temp_playback_file = None
@@ -126,10 +138,25 @@ class TTSStudioApp(ctk.CTk):
         header = ctk.CTkFrame(main_container, fg_color="transparent")
         header.pack(fill="x", padx=24, pady=(18, 4))
         header.columnconfigure(1, weight=1)
-        bar = ctk.CTkFrame(header, width=5, height=50,
-                           fg_color=COLORS["accent_primary"], corner_radius=3)
-        bar.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="ns")
-        ctk.CTkLabel(header, text=f"🎙  {APP_TITLE}", font=FONTS["title"],
+
+        logo_path = paths.bundle_dir() / "assets" / "logo.png"
+        self._logo_image = None
+        if logo_path.exists():
+            try:
+                logo_pil = Image.open(logo_path)
+                self._logo_image = ctk.CTkImage(light_image=logo_pil, dark_image=logo_pil, size=(48, 48))
+                logo_label = ctk.CTkLabel(header, text="", image=self._logo_image)
+                logo_label.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="w")
+            except Exception:
+                bar = ctk.CTkFrame(header, width=5, height=50,
+                                   fg_color=COLORS["accent_primary"], corner_radius=3)
+                bar.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="ns")
+        else:
+            bar = ctk.CTkFrame(header, width=5, height=50,
+                               fg_color=COLORS["accent_primary"], corner_radius=3)
+            bar.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="ns")
+
+        ctk.CTkLabel(header, text=APP_TITLE, font=FONTS["title"],
                      text_color=COLORS["text_primary"]).grid(row=0, column=1, sticky="w")
         engine_names = " + ".join(e.name.split("(")[0].split(" ")[0]
                                   for e in self._available_engines)
