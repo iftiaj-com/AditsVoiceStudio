@@ -760,8 +760,8 @@ class CloneVoiceGroup:
         voices = library.list_voices(ready_only=True)
         if st["frozen_unsupported"]:
             self._set_status("Not available in this build", COLORS["text_muted"])
-            self._setup_text.configure(text="Voice cloning setup is available when running "
-                                            "Adits Voice Studio from source. It is not bundled with the installer yet.")
+            self._setup_text.configure(text="Voice cloning setup requires Python 3.11 & 3.12 with the 'py' launcher "
+                                            "(from python.org) to install the isolated AI runtimes.")
             self._install_btn.grid_remove()
         elif not installed:
             self._set_status("Not installed", COLORS["text_muted"])

@@ -76,11 +76,30 @@ Cancel stops any running install, analysis, training or preview.
 ```powershell
 .\venv_311\Scripts\python.exe build_exe.py              # app folder in dist\AditsVoiceStudio
 .\venv_311\Scripts\python.exe build_exe.py --installer  # also the Setup.exe (Inno Setup 6)
+.\venv_311\Scripts\python.exe build_exe.py --skip-test  # skip the frozen self-test
 ```
 
-The build runs a self-test of the frozen app. Voice cloning's install step
-needs a Python on the PC, so the installed app shows Clone Voice as not
-available yet; it works when running from source.
+### Build & Voice Cloning Options
+
+The core application (TTS engines Kokoro, Piper, MeloTTS, SAPI5, 30+ DSP effects, and Whisper subtitles) is always bundled into the standalone executable. For the heavy AI Voice Cloning feature (RVC + Seed-VC, ~21 GB on disk), there are three build/distribution approaches:
+
+1. **Standard / Current Build (Lightweight App Bundle):**
+   * **Size:** ~6 GiB folder (`dist\AditsVoiceStudio\`).
+   * Bundles core offline speech models, DSP effects, and the voice cloning worker orchestration scripts (`vc_runtime/worker.py`), keeping installer size manageable.
+   * Does not bundle the 21 GB RVC/Seed-VC AI environments.
+
+2. **Option A: Connected / Hybrid Runtime Build (Implemented):**
+   * **How it works:** The frozen EXE actively detects and connects to an existing voice-cloning runtime:
+     * Next to the executable: `dist\AditsVoiceStudio\vc_runtime_data\`
+     * In the repository: `..\..\vc_runtime_data\`
+     * In user profile: `%LOCALAPPDATA%\AditsVoiceStudio\vc_runtime`
+   * If the runtime is already installed on the machine, Clone Voice is immediately active with all existing voices and models.
+   * If not installed on the machine, the in-app **Install** button is enabled as long as Python 3.11/3.12 (with the `py` launcher) and Git are installed on Windows.
+
+3. **Option B: Full Pre-Bundled Standalone Distribution (~27+ GiB):**
+   * **How it works:** The entire pre-built `vc_runtime_data` directory (with both `venv_rvc` and `venv_seedvc`, base model weights, and clones) is packaged directly into the distribution folder (`dist\AditsVoiceStudio\vc_runtime_data`).
+   * **Pros:** Completely offline with zero internet downloads on client machines.
+   * **Considerations:** Huge distribution size (27+ GiB). Standard Windows Python virtual environments contain machine-specific absolute paths in `pyvenv.cfg` and wrapper executables, so portable embedded Python environments or path relinking are required when copying to different systems.
 
 ## Where files are kept
 
