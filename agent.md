@@ -11,8 +11,9 @@ Welcome to the **VoiceCraft** codebase guide. This document serves as a technica
 4. [How to Add a New TTS Engine](#-how-to-add-a-new-tts-engine)
 5. [How to Add a New Voice Effect](#-how-to-add-a-new-voice-effect)
 6. [Audio Customization Deep-Dive](#-audio-customization-deep-dive)
-7. [Building & Running the App](#-building--running-the-app)
-8. [Model Weights & Troubleshooting](#-model-weights--troubleshooting)
+7. [Clone Voice (RVC and Seed-VC)](#-clone-voice-rvc-and-seed-vc)
+8. [Building & Running the App](#-building--running-the-app)
+9. [Model Weights & Troubleshooting](#-model-weights--troubleshooting)
 
 ---
 
@@ -49,7 +50,14 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `├── constants.py` | Configuration Module | Holds application-wide design tokens (colors, font configurations) and static lists of languages/voices. |
 | `├── model_cache.py` | Model Cache | Thread-safe, idle-expiring cache (`MODEL_CACHE`) for heavy TTS/ASR models. Reuses loaded instances between generations and evicts them after 5 minutes idle, returning CUDA memory to the OS. |
 | `├── temp_cleanup.py` | Housekeeping | Sweeps orphaned `tts_studio_*` temp directories left behind by a crash or force-quit. Called on startup. |
-| `└── subtitles.py` | Transcription Module | Word-level subtitle generation wrapper using `faster-whisper`. Manages dynamic GPU/CPU loading and VRAM unloading. |
+| `├── subtitles.py` | Transcription Module | Word-level subtitle generation wrapper using `faster-whisper`. Manages dynamic GPU/CPU loading and VRAM unloading. |
+| `└── voice_cloning/` | Clone Voice (app side) | Manages the voice-cloning runtime and its worker processes. Never imports torch. See [Clone Voice](#-clone-voice-rvc-and-seed-vc). |
+| `    ├── runtime.py` | Runtime Manager | Paths, the two runtime venvs, `install()` / `uninstall()`, `runtime.json` manifest, pinned upstream commits. |
+| `    ├── client.py` | Worker Client | `VCClient`: one worker per (engine, role), JSON-lines requests, cancel, GPU policy. |
+| `    ├── library.py` | Voice Library | `VoiceProfile` and the `voices/<slug>/` folders: create, import, rename, delete. |
+| `    ├── pitch.py` | Pitch Matching | Median F0 of the base and target voices, semitone offset. |
+| `    ├── estimate.py` | Time Estimates | Training and conversion time estimates shown in the UI. |
+| `    └── errors.py` | Exceptions | `VCNotInstalled`, `VCBusy`, `VCCancelled`, `VCWorkerError`, `InstallError`. |
 | **`engines/`** | Directory | Contains abstract interfaces and concrete adapters for various TTS engines. |
 | `├── base.py` | Class Interface | Declares `BaseTTSEngine`, the abstract base class that all TTS adapters must inherit and implement. |
 | `├── registry.py` | Engine Registry | Central registration file (`ENGINE_CLASSES`). Determines which engines are activated and in what order they appear in the UI. |
@@ -61,16 +69,21 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `└── pyttsx3_engine.py` | TTS Engine Adapter | Local offline adapter using standard OS speech engines (SAPI5 on Windows). |
 | **`effects/`** | Directory | Digital Signal Processing (DSP) files. |
 | `├── audio_effects.py` | DSP Library | Static class containing numerical calculations (using NumPy and Librosa) for pitch, speed, vocoders, ambiance mixers, and filters. |
-| `└── registry.py` | Effects Registry | Declares `EFFECTS_REGISTRY`, configuring how each voice effect is displayed, toggled, and called. |
+| `├── registry.py` | Effects Registry | Declares `EFFECTS_REGISTRY`, configuring how each voice effect is displayed, toggled, and called. Appends cloned voices at import. |
+| `└── cloned_voices.py` | Cloned Voice Effects | Turns each ready voice into a `clone:<slug>` registry entry and converts audio through the worker. |
 | **`ui/`** | Directory | GUI presentation layer. |
 | `├── app.py` | Core GUI Controller | The main window class `VoiceCraftApp`. Orchestrates the background thread worker, playback systems, and save actions. |
 | `├── theme.py` | UI Factory | Helper functions for creating CustomTkinter standard panels, dropdowns, sliders, and switches. |
 | `└── panels/` | Directory | Custom panel sub-widgets. |
 | `    ├── text_panel.py` | GUI Widget | Renders the text area and updates the live character count. |
 | `    ├── engine_panel.py` | GUI Widget | Engine dropdown, GPU toggle, and dynamically swapped configuration screens for each engine. |
-| `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry. |
-| `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, and sub-tracks. |
+| `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry, in two sub-sections: Cloned Voices (with the ✏️ button) and Effects. |
+| `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
+| `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
+| `    ├── clone_voice_dialog.py` | GUI Widget | Rename / delete window opened by the ✏️ button in the Cloned Voices header. |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
+| **`vc_runtime/`** | Directory | Code that runs **inside** the voice-cloning venvs and is never imported by the app: `worker.py`, `vc_common.py`, `rvc_backend.py`, `seedvc_backend.py`, `train_site/sitecustomize.py`, and the pinned `requirements-*.txt` / `.lock.txt`. |
+| **`vc_runtime_data/`** | Directory (gitignored) | The installed runtime when running from source: venvs, Applio and seed-vc clones, logs, and the voice library. |
 | **`models/`** | Directory | Storage for local model files (e.g. Piper `.onnx` files). |
 | **`output/`** | Directory | Default folder where audio and subtitles are exported. |
 
@@ -298,6 +311,207 @@ Here is how each step operates:
 
 ---
 
+## 🧬 Clone Voice (RVC and Seed-VC)
+
+Clone Voice turns recordings of a target speaker into a new tile under **Voice
+Effects → Cloned Voices**. With that tile on, every generated clip is converted
+into the target voice before the other effects run.
+
+There are three ways to make a voice:
+
+| Mode | Engine | Needs | Ready in |
+| :--- | :--- | :--- | :--- |
+| Quick | Seed-VC (zero-shot) | 3 to 25 s of clean speech | seconds |
+| Train (RVC) | Applio | 1+ min of speech, 3+ min recommended | minutes to hours |
+| Import model | Applio | an RVC `.pth`, optional `.index` | seconds |
+
+### Using it in the app
+
+* **Customization → Clone Voice → Active voice:** pick a voice (this switches its
+  tile on), then tune it. RVC voices have Pitch (with 🎯 Match), Index rate and
+  Protect. Quick voices have Quality steps. The estimate line shows how long the
+  current text will take. ▶ Preview converts a short sentence.
+* **Customization → Clone Voice → Create voice:** name, mode, clips (or a model
+  file), and for training Epochs, Batch and Sample rate. The estimated time
+  updates as the options change. One progress row with ✖ Cancel serves install,
+  creation, training, preview and pitch matching.
+* **Voice Effects → Cloned Voices → ✏️:** rename or delete voices. Unfinished and
+  failed voices are listed too, so they can be cleaned up.
+* Settings are saved to the voice's `profile.json` as the sliders move.
+* Clip formats: `core.audio_io.AUDIO_EXTENSIONS` (WAV, MP3, M4A, AAC, MP4, FLAC,
+  OGG/OGA, Opus, WebM, WMA, AIFF, CAF, AMR, 3GP). `load_segment()` tries
+  libsndfile first and falls back to PyAV for AAC, WebM, WMA, AMR and 3GP. PyAV
+  bundles its own FFmpeg libraries and already ships with the app because
+  faster-whisper needs it, so no ffmpeg install is required.
+
+### Architecture
+
+The cloning engines need versions of torch, numpy and transformers that clash
+with each other and with the app. They therefore run in **two separate venvs**,
+in **separate processes**, and the app talks to them over JSON lines.
+
+```mermaid
+graph LR
+    UI[Clone Voice group / effect tile] --> Client[core.voice_cloning.client.VCClient]
+    Client -- stdin/stdout JSON lines --> WR[worker.py --engine rvc<br/>venv_rvc: Py 3.12, torch 2.11 cu128]
+    Client -- stdin/stdout JSON lines --> WS[worker.py --engine seedvc<br/>venv_seedvc: Py 3.11, torch 2.4 cu121]
+    WR --> Applio[Applio @ 324f4d89]
+    WS --> SeedVC[seed-vc @ 51383efd, archived]
+    WR -- Popen core.py train --> Train[Applio training processes]
+```
+
+* The app never imports torch for cloning. `core/voice_cloning/` is standard
+  library only at import time, so startup and `--selftest` are unaffected when
+  the runtime is missing.
+* One worker per (engine, role): `("rvc","convert")`, `("seedvc","convert")`,
+  `("rvc","train")`. Only one convert worker is alive at a time (4 GB GPU),
+  training stops every convert worker, and conversions raise `VCBusy` while a
+  voice trains.
+* Workers exit after 5 minutes idle, when the app closes their stdin, or on
+  `shutdown`. `TTSStudioApp.destroy()` calls `shutdown_client()`.
+* `TTSStudioApp._engine_lock` serializes every `engine.synthesize()` call,
+  because the Clone Voice tools synthesize too (base sample, preview).
+
+### Where things live
+
+| What | From source | Installed EXE |
+| :--- | :--- | :--- |
+| Runtime root | `vc_runtime_data/` in the repo | `%LOCALAPPDATA%\VoiceCraft\vc_runtime` |
+| Override | `%LOCALAPPDATA%\VoiceCraft\settings\clone_voice.json` with `{"runtime_root": "E:\\..."}` | same |
+| Manifest | `<root>\runtime.json` (one verified entry per engine) | same |
+| Logs | `<root>\logs\install.log`, `worker-rvc.log`, `worker-rvc-train.log`, `worker-seedvc.log` | same |
+| Voices | `<root>\voices\<slug>\` | same |
+
+A voice folder holds `profile.json` (schema 1: name, mode `rvc|seedvc`, status
+`draft|training|ready|failed`, pitch, index_rate, protect, diffusion_steps,
+base voice and F0 values), `clips/`, `reference.wav` (Quick) or
+`model/<slug>.pth` + `.index` (RVC), and `samples/`. Paths inside the profile
+are relative, so the whole root can be moved.
+
+### Installing the runtime
+
+Click **Install voice cloning** in Customization → Clone Voice, or run:
+
+```powershell
+.\venv_311\Scripts\python.exe -c "from core.voice_cloning import runtime; runtime.install(progress_cb=lambda f,m: print(f'{f:.2f} {m}'), log_cb=print)"
+```
+
+Requirements: Python 3.12 and 3.11 reachable through the `py` launcher, Git,
+about 9 GB of downloads and about 21 GB free on the runtime drive. Each step is
+skipped when already done, so re-running repairs a broken install:
+
+1. Create `venv_rvc` / `venv_seedvc` with the `py` launcher.
+2. Install torch from the CUDA index, then `vc_runtime/requirements-<engine>.txt`
+   (stamped by sha256, then `pip check`). `requirements-<engine>.lock.txt` records
+   the exact versions that were verified.
+3. Shallow-fetch Applio and seed-vc at the commits pinned in `runtime.ENGINES`.
+4. Applio only: copy `assets/config_template.json` to `assets/config.json`, run
+   `core.py prerequisites`, and check each base model against the sizes in
+   `runtime.APPLIO_MODELS`. Mismatches are deleted and fetched once more.
+5. Run each worker with `--selfcheck` (Seed-VC downloads about 1.8 GB here) and
+   write the manifest. The pip cache (about 5 GB) is deleted at the end.
+
+The installed EXE cannot create venvs yet, so the group shows "Not available in
+this build". `build_exe.py` still bundles `vc_runtime/` as data so a later
+release can install from the EXE.
+
+### Worker protocol
+
+Requests: `{"id", "cmd": "ping" | "selfcheck" | "convert" | "inspect" | "train" | "cancel" | "shutdown", ...}`.
+Events: `{"event": "ready"}` once, then per request `progress` (stage,
+fraction, message, epoch, total_epoch, eta_seconds), `log`, `done` (result) or
+`error` (kind `oom | ram | cancelled | dataset_too_small | not_found | bad_model | generic`, message, hint).
+
+A cancel is sent to the worker. If it has not answered in 8 s (an in-process
+conversion cannot be interrupted), the client kills the worker tree with
+`taskkill /F /T`, and it respawns on next use. Training cancels in under a second.
+
+### How a cloned voice joins the effects
+
+`effects/registry.py` calls `extend_with_cloned_voices(EFFECTS_REGISTRY)` at
+import. Each ready voice becomes an entry right after `normalize` with
+`exclusive_group: "clone"`, so conversion runs before every other DSP effect.
+`EffectsPanel` shows these entries in the Cloned Voices grid and the rest in the
+Effects grid. `ui/app.py` holds the same list object, so
+`refresh_cloned_voices()` changes it **in place**; never rebind it. After any
+library change call `app.refresh_cloned_voices(select=slug)`, which also re-syncs
+the tiles and the Clone Voice picker.
+
+In `_generate_worker`, a clone entry gets `cancel_event` and `status_cb`, plus
+the Customization slider values from `cust_settings["clone_voice"]` when its slug
+matches. A clone failure other than Cancel is not fatal: the clip keeps the
+engine voice, and the final status shows why instead of "success".
+
+### Pitch matching and time estimates
+
+RVC keeps the input's pitch contour, so a high engine voice converted into a
+low target sounds wrong. **Match pitch** synthesizes `pitch.BASE_SENTENCE` with
+the current engine voice and sets `12 * log2(target F0 / base F0)`, clamped to
+plus or minus 24 semitones. Measured: Kokoro `af_heart` at 191 to 200 Hz, a deep
+male target at 84 Hz, offset -14.
+
+`core/voice_cloning/estimate.py` holds the estimates, calibrated on a GTX 1650
+(4 GB) with 14 GB RAM:
+
+| Job | Measured |
+| :--- | :--- |
+| RVC training, 94 s audio, 3 epochs, batch 2 | 358 to 365 s total, about 31 s per epoch |
+| RVC conversion, 8 s of speech | 2.2 s warm, about 35 s more on first use |
+| Quick conversion, 8 s of speech, 10 steps | 18 s warm, about 40 s more on first use |
+
+Batch 1 and the 32 / 48 kHz factors are guesses. During training the time left
+comes from the measured epoch times instead.
+
+### Lessons from bring-up (keep these)
+
+* **Windows stdin deadlock.** While one thread blocks reading a stdin pipe,
+  loading a DLL with a static C runtime (for example `import numpy`) blocks too.
+  `worker._detach_stdin()` moves the request pipe to a private handle and points
+  standard input at NUL. Never read requests from fd 0 directly.
+* **RAM, not VRAM, limits training on 14 GB.** Applio hardcodes
+  `DataLoader(num_workers=4, prefetch_factor=8)`, and each loader worker loads
+  all of torch (about 2 GB commit). One run died with MemoryError.
+  `vc_runtime/train_site/sitecustomize.py` is put on `PYTHONPATH` for training
+  only and caps the workers at `VC_MAX_LOADER_WORKERS` (default 0). Peak commit
+  fell from 34.5 GB to about 29 GB with no slower epochs. Applio's files are not
+  edited.
+* **Applio quirks.** Without `assets/config.json`, training "succeeds" but writes
+  no model, so success is judged by the `<name>_<E>e_<S>s.pth` file, not the exit
+  code (train.py exits 2333333 on success and on "not enough data").
+  `convert_audio()` returns silently on a missing model and replaces "trained"
+  with "added" anywhere in the index path, so the backend checks files and
+  copies such indexes to a neutral path. Models load with `weights_only=True`.
+* **GTX 16xx has no tensor cores.** Seed-VC at fp32 with 10 steps ran about 7x
+  faster than its fp16 / 30-step default, with the same transcript.
+* **sm_75 is the oldest arch in torch 2.11 cu128.** Keep Applio pinned; a newer
+  torch may drop the GTX 1650.
+* A venv's `python.exe` on Windows is a launcher that starts the real
+  interpreter as a child. Always kill with `/T`.
+* `CustomizationPanel.cleanup()` also runs when the ambiance choice changes, so
+  clone cleanup is called from `TTSStudioApp.destroy()`, not from there.
+
+### Troubleshooting
+
+| Symptom | Check |
+| :--- | :--- |
+| "Not installed" after an install | `<root>\runtime.json` must have `"verified": true` for both engines. Read `<root>\logs\install.log`. |
+| A conversion fails | `<root>\logs\worker-<engine>.log` has the full traceback. |
+| Training stops with "ran out of memory (RAM)" | Close browsers and IDEs. Keep `VC_MAX_LOADER_WORKERS` at 0. |
+| Training stops with "Out of GPU memory" | Lower the batch size (2, then 1). |
+| A stray `python.exe` after closing | `Get-CimInstance Win32_Process -Filter "Name='python.exe'"`, look for `worker.py` or `core.py`, then `taskkill /F /T /PID <pid>`. |
+| Base models look damaged | Delete the file under `<root>\Applio\rvc\models\...` and run the install again. |
+| Start over | Delete `<root>\runtime.json` (keeps everything, re-verifies) or call `runtime.uninstall()` (keeps `voices/`). |
+
+### Licenses
+
+Applio is MIT and Seed-VC is GPL-3.0; both are compatible with this app's
+GPL-3.0-or-later license. Neither is bundled: the runtime installer downloads
+them, so they do not appear in `THIRD_PARTY_NOTICES.txt`. Seed-VC's repository
+was archived on 2025-11-21, and its models download from Hugging Face on first
+use.
+
+---
+
 ## 🛠 Building & Running the App
 
 ### Running Locally
@@ -334,6 +548,7 @@ You can package VoiceCraft into a standalone Windows directory:
    * stamps version, icon and splash screen into the EXE;
    * prunes build-only files (`torch/lib/*.lib`, headers, C sources, pygame tests);
    * writes `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` and `licenses/` into the app folder;
+   * bundles `vc_runtime/` (worker scripts and pinned requirements) as data, but no cloning libraries;
    * runs `TTS_Studio.exe --selftest` and stops if any offline engine produces no audio.
 3. Once completed, the distribution is saved in the `./dist/TTS_Studio/` folder (dominated by the CUDA build of PyTorch). Run `TTS_Studio.exe` to launch the portable app.
 
@@ -477,6 +692,10 @@ non-English languages have not been tested from a non-ASCII path.
 * `kokoro-onnx` depends on `phonemizer>=3.4.0`, which installs over the
   `phonemizer-fork` that `kokoro` and `misaki` need, since both ship the same
   `phonemizer` module. Install it last with `--no-deps`.
+* Never pip-install Applio or Seed-VC packages into `venv_311`. They live in
+  `vc_runtime_data\venv_rvc` and `venv_seedvc` and pin conflicting versions.
+* `C:` has little free space here. The runtime installer sends `TEMP`, `TMP`,
+  `PIP_CACHE_DIR` and `HF_HOME` to the runtime root for that reason.
 
 To audit a finished build, the PyInstaller TOC records absolute source paths:
 

@@ -47,6 +47,8 @@ from engines.registry   import get_available_engines
 from engines.pyttsx3_engine import Pyttsx3Engine
 from effects.audio_effects  import AudioEffects
 from effects.registry       import EFFECTS_REGISTRY
+from effects.cloned_voices  import is_clone_entry, slug_of
+import core.voice_cloning as voice_cloning
 
 try:
     import librosa
@@ -76,9 +78,11 @@ class TTSStudioApp(ctk.CTk):
         self._final_saved_file   = None
         self._is_playing         = False
         self._is_generating      = False
+        self._gen_notice         = None    # warning shown instead of "success"
         self._playback_thread    = None
         self._stop_event         = threading.Event()
         self._tmp_dirs           = set()   # every mkdtemp we own, for cleanup
+        self._engine_lock        = threading.Lock()   # one engine.synthesize() at a time
 
         # Best-effort temp cleanup on any interpreter exit (incl. unhandled
         # exceptions). Hard crashes are covered by the startup sweep in
@@ -103,6 +107,7 @@ class TTSStudioApp(ctk.CTk):
             self._audio_error = str(e)
             print(f"Audio output unavailable: {e}")
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         if self._audio_error:
             self._set_status(f"⚠  No audio output device — playback disabled ({self._audio_error})",
                              COLORS["warning"])
@@ -179,8 +184,11 @@ class TTSStudioApp(ctk.CTk):
 
         # Panels in Right Scrollable Column
         self._engine_panel = EnginePanel(right_scroll, self._available_engines, self._system_voices, row=None)
-        self._cust_panel = CustomizationPanel(right_scroll, row=None)
-        self._effects_panel = EffectsPanel(right_scroll, row=None)
+        self._cust_panel = CustomizationPanel(right_scroll, row=None, app=self)
+        self._effects_panel = EffectsPanel(right_scroll, row=None,
+                                           on_edit_clones=self._open_voice_manager)
+        if self._cust_panel.clone_group is not None:
+            self._cust_panel.clone_group.attach(self._effects_panel)
 
         # Status Bar (Bottom)
         status_frame = ctk.CTkFrame(main_container, fg_color=COLORS["bg_card"],
@@ -254,6 +262,7 @@ class TTSStudioApp(ctk.CTk):
         self._temp_srt           = None
 
         self._is_generating = True
+        self._gen_notice    = None
         self._stop_event.clear()
 
         pp = self._play_panel
@@ -300,7 +309,11 @@ class TTSStudioApp(ctk.CTk):
 
         if self._temp_mp3:
             pp.open_folder_btn.configure(state="normal")
-        self._set_status("✅  Speech generated successfully!", COLORS["success"])
+        if self._gen_notice:
+            # A step was skipped (e.g. the cloned voice); don't hide that behind "success".
+            self._set_status(f"⚠  Speech generated. {self._gen_notice}", COLORS["warning"])
+        else:
+            self._set_status("✅  Speech generated successfully!", COLORS["success"])
         if autoplay:
             self._on_play()
 
@@ -314,6 +327,37 @@ class TTSStudioApp(ctk.CTk):
         pp.progress.set(0)
         self._set_status(f"❌  Error: {error_msg}", COLORS["error"])
         messagebox.showerror("Generation Error", error_msg)
+
+    @staticmethod
+    def _engine_kwargs(eng_settings, device_str, status_cb, check_cancel) -> dict:
+        """Keyword arguments for engine.synthesize() from EnginePanel.get_settings().
+
+        Shared by generation and the Clone Voice dialog (base-voice sample).
+        """
+        engine_name = eng_settings["engine_name"]
+        kwargs = dict(
+            device=device_str,
+            status_cb=status_cb,
+            check_cancel=check_cancel,
+            lang_key=eng_settings["gtts_lang_key"],
+            voice_key=(
+                eng_settings["edge_voice_key"]   if "Edge"    in engine_name else
+                eng_settings["kokoro_voice_key"] if "Kokoro"  in engine_name else
+                eng_settings["piper_voice_key"]  if "Piper"   in engine_name else
+                eng_settings["kokoro_voice_key"]  # fallback
+            ),
+            melo_voice_cfg=eng_settings["melo_voice_cfg"],
+            melo_speed=eng_settings["melo_speed"],
+            rate=eng_settings["edge_rate"],
+            kokoro_speed=eng_settings["kokoro_speed"],
+            kokoro_lang_code=eng_settings.get("kokoro_lang_code", "a"),
+            kokoro_subtitle=eng_settings.get("kokoro_subtitle", False),
+            voice_id=eng_settings["pyttsx3_voice_id"],
+            volume=eng_settings["pyttsx3_volume"],
+        )
+        if "pyttsx3" in engine_name:
+            kwargs["rate"] = eng_settings["pyttsx3_rate"]
+        return kwargs
 
     def _generate_worker(self, text, preview=False):
         def check_cancel():
@@ -347,6 +391,9 @@ class TTSStudioApp(ctk.CTk):
             eng_settings  = self._engine_panel.get_settings()
             cust_settings = self._cust_panel.get_settings()
             fx_active     = self._effects_panel.get_active_effects()
+            # Per-voice overrides from the Clone Voice group; empty means
+            # "use the values saved in the voice's profile".
+            clone_cfg     = cust_settings.get("clone_voice") or {}
 
             engine_name = eng_settings["engine_name"]
             use_gpu     = eng_settings["use_gpu"] and torch.cuda.is_available()
@@ -357,32 +404,13 @@ class TTSStudioApp(ctk.CTk):
             if engine is None:
                 raise RuntimeError(f"Engine '{engine_name}' not found.")
 
-            # Build per-engine kwargs
-            kwargs = dict(
-                device=device_str,
-                status_cb=status,
-                check_cancel=check_cancel,
-                lang_key=eng_settings["gtts_lang_key"],
-                voice_key=(
-                    eng_settings["edge_voice_key"]   if "Edge"    in engine_name else
-                    eng_settings["kokoro_voice_key"] if "Kokoro"  in engine_name else
-                    eng_settings["piper_voice_key"]  if "Piper"   in engine_name else
-                    eng_settings["kokoro_voice_key"]  # fallback
-                ),
-                melo_voice_cfg=eng_settings["melo_voice_cfg"],
-                melo_speed=eng_settings["melo_speed"],
-                rate=eng_settings["edge_rate"],
-                kokoro_speed=eng_settings["kokoro_speed"],
-                kokoro_lang_code=eng_settings.get("kokoro_lang_code", "a"),
-                kokoro_subtitle=eng_settings.get("kokoro_subtitle", False),
-                voice_id=eng_settings["pyttsx3_voice_id"],
-                volume=eng_settings["pyttsx3_volume"],
-            )
-            if "pyttsx3" in engine_name:
-                kwargs["rate"] = eng_settings["pyttsx3_rate"]
+            kwargs = self._engine_kwargs(eng_settings, device_str, status, check_cancel)
 
             progress(0.10)
-            result = engine.synthesize(text, tmp_dir, **kwargs)
+            # The Clone Voice tools also synthesize (base-voice sample, preview);
+            # engines are not known to be thread-safe, so one call at a time.
+            with self._engine_lock:
+                result = engine.synthesize(text, tmp_dir, **kwargs)
             if check_cancel():
                 return
 
@@ -464,6 +492,29 @@ class TTSStudioApp(ctk.CTk):
                         status(f"Applying {effect['label'].split('  ')[-1]}…")
                         fn        = effect["fn"]
                         kwargs_fx = effect.get("kwargs", {})
+                        if is_clone_entry(effect):
+                            # Cloned voice: runs in a worker process; can take
+                            # seconds to a minute, and must honour Cancel.
+                            from core.voice_cloning.errors import VCCancelled, VCError
+                            kwargs_fx = dict(kwargs_fx, cancel_event=self._stop_event,
+                                             status_cb=status)
+                            cfg = clone_cfg if clone_cfg.get("slug") == slug_of(effect["key"]) else {}
+                            for name in ("pitch", "index_rate", "protect", "diffusion_steps"):
+                                if cfg.get(name) is not None:
+                                    kwargs_fx[name] = cfg[name]
+                            try:
+                                samples = fn(samples, sr, **kwargs_fx)
+                            except VCCancelled:
+                                if check_cancel():
+                                    return
+                                raise
+                            except VCError as vc_err:
+                                # Keep going in the engine's own voice; say why.
+                                self._gen_notice = (f"Cloned voice not applied: "
+                                                    f"{vc_err.message}")
+                                warn(f"⚠ {self._gen_notice}")
+                            step()
+                            continue
                         try:
                             samples = fn(samples, sr, **kwargs_fx)
                         except TypeError:
@@ -757,11 +808,60 @@ class TTSStudioApp(ctk.CTk):
         if pf:
             shutil.rmtree(os.path.dirname(pf), ignore_errors=True)
 
+    # ──────────────────────────────────────────────────────────────
+    #  CLONED VOICES
+    # ──────────────────────────────────────────────────────────────
+
+    def refresh_cloned_voices(self, select=None):
+        """Re-read the voice library into the registry, the tiles and the Clone Voice group.
+
+        select: slug of a voice to switch on afterwards (e.g. just created).
+        """
+        from effects.cloned_voices import refresh_cloned_voices
+        try:
+            refresh_cloned_voices(EFFECTS_REGISTRY)
+        except Exception as e:
+            print(f"Cloned voice refresh failed: {e}")
+        self._effects_panel.sync()
+        group = self._cust_panel.clone_group
+        if group is not None:
+            group.refresh()
+        if select:
+            self._effects_panel.set_active(f"clone:{select}", True)
+
+    def _open_voice_manager(self):
+        from ui.panels.clone_voice_dialog import ManageVoicesDialog
+        win = getattr(self, "_voice_manager", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            win.focus_force()
+            return
+        self._voice_manager = ManageVoicesDialog(self)
+
+    def _on_close(self):
+        if voice_cloning.is_training():
+            if not messagebox.askyesno(
+                    "Voice training in progress",
+                    "A cloned voice is still training.\n\n"
+                    "Closing TTS Studio stops the training and discards it. Close anyway?",
+                    icon="warning", parent=self):
+                return
+        self._stop_event.set()
+        self.destroy()
+
     def destroy(self):
         try:
             pygame.mixer.quit()
         except Exception:
             pass
+        # Stop clone tasks/preview, then the worker processes (no-op if none started).
+        group = getattr(getattr(self, "_cust_panel", None), "clone_group", None)
+        if group is not None:
+            group.cleanup()
+        try:
+            voice_cloning.shutdown_client()
+        except Exception as e:
+            print(f"Voice cloning shutdown failed: {e}")
         self._cleanup_tmp_dirs()
         if hasattr(self, '_cust_panel') and hasattr(self._cust_panel, 'cleanup'):
             self._cust_panel.cleanup()

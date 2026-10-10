@@ -138,6 +138,27 @@ def _bundle_models(command):
     return True
 
 
+def _bundle_vc_runtime(command):
+    """Ship the voice-cloning worker scripts and pinned requirements as data.
+
+    They run inside the separate runtime venvs (see core/voice_cloning/runtime.py),
+    never inside the frozen app, so PyInstaller's import analysis cannot find
+    them. The frozen app cannot create those venvs yet (no Python to build them
+    from), so Clone Voice shows "Not available in this build"; the files are
+    bundled so a later release can install the runtime from the EXE.
+    Nothing here is added to _REQUIRED or --collect-all: torch for cloning
+    lives in the runtime venvs, not in the app.
+    """
+    src = BASE_DIR / "vc_runtime"
+    files = sorted(list(src.glob("*.py")) + list(src.glob("requirements-*.txt")))
+    for f in files:
+        _add(command, f, "vc_runtime")
+    site = sorted((src / "train_site").glob("*.py"))
+    for f in site:
+        _add(command, f, "vc_runtime/train_site")
+    print(f"[*] Bundling voice-cloning worker files: {len(files) + len(site)} files")
+
+
 def _write_version_file(path):
     nums = [int(x) for x in re.findall(r"\d+", __version__)[:4]]
     nums += [0] * (4 - len(nums))
@@ -351,6 +372,8 @@ def build(args):
                 break
     except Exception as e:
         print(f"[*] Warning: Could not locate NLTK data directory: {e}")
+
+    _bundle_vc_runtime(command)
 
     command.append(str(BASE_DIR / "tts_app.py"))
 

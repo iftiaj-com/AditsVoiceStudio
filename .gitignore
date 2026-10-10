@@ -65,3 +65,8 @@ test_*.wav
 
 # Voice cloning runtime (venvs, Applio, seed-vc, voices) - see agent.md
 vc_runtime_data/
+# RVC search indexes that come with downloaded voice models (*.pth is above)
+*.index
+# Partial downloads and interrupted atomic writes (profile.json.tmp, runtime.json.tmp)
+*.part
+*.tmp

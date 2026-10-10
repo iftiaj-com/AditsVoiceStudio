@@ -12,7 +12,7 @@ from effects.audio_effects import AudioEffects
 
 
 class CustomizationPanel:
-    def __init__(self, parent, row=None):
+    def __init__(self, parent, row=None, app=None):
         if row is not None:
             frame = card(parent, row, "⚙️  Customization Options")
             container = ctk.CTkFrame(frame, fg_color="transparent")
@@ -245,6 +245,13 @@ class CustomizationPanel:
                                        font=FONTS["body_small"],
                                        text_color=COLORS["text_muted"])
         
+        # ── Group 6: Clone Voice ───────────────────────────────────
+        # Needs the app (engine panel, effects panel, status bar).
+        self.clone_group = None
+        if app is not None:
+            from ui.panels.clone_voice_group import CloneVoiceGroup
+            self.clone_group = CloneVoiceGroup(container, app)
+
         # Initialize visibility state
         self._on_env_change("None")
         self._on_eq_change()
@@ -466,4 +473,5 @@ class CustomizationPanel:
             "eq_mids":         self.eq_mids_var.get(),
             "eq_treble":       self.eq_treble_var.get(),
             "sub_segmentation": "sentence" if self.sub_seg_var.get() == "Sentence-Level" else "word",
+            "clone_voice":     self.clone_group.get_settings() if self.clone_group else {},
         }

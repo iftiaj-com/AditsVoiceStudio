@@ -230,3 +230,12 @@ EFFECTS_REGISTRY = [
         "fn":     AudioEffects.megaphone,
     },
 ]
+
+# Cloned voices (Customization → Clone Voice) join the list as "clone:<slug>"
+# entries right after "normalize", so conversion runs before other effects.
+# A damaged voice folder or missing runtime must never stop the app starting.
+try:
+    from effects.cloned_voices import extend_with_cloned_voices
+    extend_with_cloned_voices(EFFECTS_REGISTRY)
+except Exception as _clone_err:   # noqa: BLE001
+    print(f"Cloned voices not loaded: {_clone_err}")
