@@ -57,6 +57,10 @@ class VoiceProfile:
     diffusion_steps: int = 10         # seedvc quality
     base_engine: str = ""
     base_voice: str = ""
+    # Engine-panel dropdown values the voice was made with, e.g.
+    # {"engine": "Kokoro-82M (Fast Local AI)", "kind": "kokoro", "lang": "American English",
+    #  "voice": "am_onyx"}. Switching the voice on re-selects it (see EnginePanel).
+    base_selection: dict = None
     base_f0_hz: float = None
     target_f0_hz: float = None
     imported: bool = False
@@ -170,7 +174,7 @@ def list_voices(ready_only=False) -> list:
 def update_params(slug, **changes) -> VoiceProfile:
     allowed = {"name", "pitch", "index_rate", "protect", "diffusion_steps", "status", "error",
                "pth", "index", "sample_rate", "epochs", "batch_size", "reference_wav",
-               "base_f0_hz", "target_f0_hz", "base_engine", "base_voice"}
+               "base_f0_hz", "target_f0_hz", "base_engine", "base_voice", "base_selection"}
     bad = set(changes) - allowed
     if bad:
         raise ValueError(f"Cannot update {sorted(bad)}")
@@ -206,7 +210,7 @@ def audio_seconds(path) -> float:
         return len(load_segment(str(path))) / 1000.0
 
 
-def create_voice(name, mode, clip_paths, base_engine="", base_voice="") -> VoiceProfile:
+def create_voice(name, mode, clip_paths, base_engine="", base_voice="", base_selection=None) -> VoiceProfile:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     if not clip_paths:
@@ -229,7 +233,7 @@ def create_voice(name, mode, clip_paths, base_engine="", base_voice="") -> Voice
         name=name.strip() or slug, slug=slug, mode=mode, status="draft",
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         clips=clips, total_seconds=round(sum(c["seconds"] for c in clips), 2),
-        base_engine=base_engine, base_voice=base_voice,
+        base_engine=base_engine, base_voice=base_voice, base_selection=base_selection,
     )
     save_voice(p)
     return p

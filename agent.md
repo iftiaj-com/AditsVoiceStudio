@@ -338,6 +338,17 @@ There are three ways to make a voice:
 * **Voice Effects → Cloned Voices → ✏️:** rename or delete voices. Unfinished and
   failed voices are listed too, so they can be cleaned up.
 * Settings are saved to the voice's `profile.json` as the sliders move.
+* **Base voice.** A clone sounds best when converted from the engine voice it was
+  made with. Creating a voice stores the TTS Engine dropdown values in
+  `profile.base_selection` (engine, Kokoro language, voice, and speed: Kokoro /
+  Melo speed, Edge rate, pyttsx3 WPM; Piper and gTTS have none). Switching the
+  voice on, from its tile or the picker, calls
+  `EnginePanel.apply_voice_selection()`, which restores all of it and reports why
+  if it cannot (engine missing, voice missing); nothing changes in that case. The
+  user can still change engine, voice or speed afterwards. **Use current** saves
+  the current selection as the base (for imported models, or to re-base a voice).
+  Voices made before this field existed fall back to `base_engine` / `base_voice`
+  and keep the current speed.
 * Clip formats: `core.audio_io.AUDIO_EXTENSIONS` (WAV, MP3, M4A, AAC, MP4, FLAC,
   OGG/OGA, Opus, WebM, WMA, AIFF, CAF, AMR, 3GP). `load_segment()` tries
   libsndfile first and falls back to PyAV for AAC, WebM, WMA, AMR and 3GP. PyAV

@@ -179,29 +179,41 @@ class CloneVoiceGroup:
         self._mode_tag = _small(top, "", COLORS["text_muted"])
         self._mode_tag.pack(side="left")
 
+        # Base voice: the engine voice this clone was made from. Switching the
+        # clone on selects it in the TTS Engine card (conversion sounds best
+        # from the same source voice).
+        self._base_row = ctk.CTkFrame(page, fg_color="transparent")
+        self._base_row.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        _small(self._base_row, "Base voice:", width=78, anchor="w").pack(side="left")
+        self._base_value = _small(self._base_row, "", COLORS["text_primary"])
+        self._base_value.pack(side="left", padx=(0, 8))
+        self._use_current_btn = _btn(self._base_row, "Use current", self._on_use_current_base,
+                                     COLORS["accent_primary"], width=96)
+        self._use_current_btn.pack(side="left")
+
         self.pitch_var = ctk.DoubleVar(value=0)
         self.index_var = ctk.DoubleVar(value=0.3)
         self.protect_var = ctk.DoubleVar(value=0.33)
         self.steps_var = ctk.DoubleVar(value=10)
-        self._pitch_row = self._slider_row(page, 1, "Pitch:", self.pitch_var, -24, 24, 48,
+        self._pitch_row = self._slider_row(page, 2, "Pitch:", self.pitch_var, -24, 24, 48,
                                            lambda v: f"{int(round(v)):+d} st", self._params_changed)
         self._match_btn = _btn(self._pitch_row, "🎯 Match", self._on_match_pitch,
                                COLORS["accent_primary"], width=80)
         self._match_btn.pack(side="left", padx=(6, 0))
-        self._index_row = self._slider_row(page, 2, "Index rate:", self.index_var, 0, 1, 100,
+        self._index_row = self._slider_row(page, 3, "Index rate:", self.index_var, 0, 1, 100,
                                            lambda v: f"{v:.2f}", self._params_changed)
-        self._protect_row = self._slider_row(page, 3, "Protect:", self.protect_var, 0, 0.5, 50,
+        self._protect_row = self._slider_row(page, 4, "Protect:", self.protect_var, 0, 0.5, 50,
                                              lambda v: f"{v:.2f}", self._params_changed)
-        self._steps_row = self._slider_row(page, 4, "Quality:", self.steps_var, 4, 50, 46,
+        self._steps_row = self._slider_row(page, 5, "Quality:", self.steps_var, 4, 50, 46,
                                            lambda v: f"{int(round(v))} steps", self._params_changed)
         self._active_hint = _small(page, "", COLORS["text_muted"], anchor="w", justify="left",
                                    wraplength=420)
-        self._active_hint.grid(row=5, column=0, sticky="w", pady=(2, 0))
+        self._active_hint.grid(row=6, column=0, sticky="w", pady=(2, 0))
         self._active_est = _small(page, "", COLORS["text_secondary"], anchor="w", justify="left",
                                   wraplength=420)
-        self._active_est.grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self._active_est.grid(row=7, column=0, sticky="w", pady=(4, 0))
         self._preview_btn = _btn(page, "▶  Preview", self._on_preview, COLORS["success"], width=120)
-        self._preview_btn.grid(row=7, column=0, sticky="w", pady=(6, 0))
+        self._preview_btn.grid(row=8, column=0, sticky="w", pady=(6, 0))
         return page
 
     def _build_create_page(self, parent):
@@ -381,6 +393,7 @@ class CloneVoiceGroup:
 
     def _on_active_changed(self, key):
         slug = key[len(KEY_PREFIX):] if key else None
+        newly_on = slug is not None and slug != self._active_slug
         self._flush_params()
         self._active_slug = slug
         self._active_profile = None
@@ -391,6 +404,9 @@ class CloneVoiceGroup:
                 self._active_profile = None
         p = self._active_profile
         self._sync_picker()
+        self._show_base(p)
+        if p is not None and newly_on:
+            self._apply_base(p)
         rows_rvc = (self._pitch_row, self._index_row, self._protect_row)
         if p is None:
             for r in rows_rvc + (self._steps_row,):
@@ -503,6 +519,68 @@ class CloneVoiceGroup:
     def _clip_seconds(self):
         return sum(s for _, s in self._clips)
 
+    def _engine_selection(self):
+        try:
+            return self.app._engine_panel.get_voice_selection()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _selection_for(p):
+        """The profile's base selection; older voices only stored engine + voice."""
+        if p is None:
+            return None
+        if p.base_selection:
+            return p.base_selection
+        if p.base_engine:
+            from ui.panels.engine_panel import EnginePanel
+            return {"engine": p.base_engine, "kind": EnginePanel.engine_kind(p.base_engine),
+                    "voice": p.base_voice or None}
+        return None
+
+    def _show_base(self, p):
+        from ui.panels.engine_panel import EnginePanel
+        sel = self._selection_for(p)
+        if p is None:
+            self._base_row.grid_remove()
+            return
+        self._base_row.grid()
+        if sel:
+            self._base_value.configure(text=EnginePanel.describe_selection(sel),
+                                       text_color=COLORS["text_primary"])
+        else:
+            self._base_value.configure(text="not set", text_color=COLORS["text_muted"])
+
+    def _apply_base(self, p):
+        """Select the voice's base engine voice in the TTS Engine card."""
+        from ui.panels.engine_panel import EnginePanel
+        sel = self._selection_for(p)
+        if not sel:
+            self.app._set_status(f"ℹ  '{p.name}' has no base voice yet. Pick an engine voice and press "
+                                 "Use current in Clone Voice.", COLORS["text_secondary"])
+            return
+        err = self.app._engine_panel.apply_voice_selection(sel)
+        if err:
+            self.app._set_status(f"⚠  Base voice for '{p.name}' not selected: {err}", COLORS["warning"])
+        else:
+            self.app._set_status(f"🔁  TTS Engine set to {EnginePanel.describe_selection(sel)}, "
+                                 f"the base voice of '{p.name}'", COLORS["accent_primary"])
+        self._update_create()
+
+    def _on_use_current_base(self):
+        from ui.panels.engine_panel import EnginePanel
+        p = self._active_profile
+        sel = self._engine_selection()
+        if p is None or not sel:
+            return
+        p = library.update_params(p.slug, base_selection=sel, base_engine=sel["engine"],
+                                  base_voice=str(sel.get("voice") or ""))
+        self._active_profile = p
+        self._show_base(p)
+        hint = " Press 🎯 Match to re-measure the pitch." if p.mode == "rvc" and p.clips else ""
+        self.app._set_status(f"✅  Base voice of '{p.name}' set to "
+                             f"{EnginePanel.describe_selection(sel)}.{hint}", COLORS["success"])
+
     def _base_voice(self):
         try:
             s = self.app._engine_panel.get_settings()
@@ -522,8 +600,9 @@ class CloneVoiceGroup:
         (self._clips_row.grid if mode != "Import model" else self._clips_row.grid_remove)()
         (self._import_row.grid if mode == "Import model" else self._import_row.grid_remove)()
         (self._train_opts.grid if mode == "Train (RVC)" else self._train_opts.grid_remove)()
-        eng, voice, _ = self._base_voice()
-        self._base_label.configure(text=f"Base: {eng.split(' (')[0]} · {voice}" if eng else "")
+        from ui.panels.engine_panel import EnginePanel
+        sel = self._engine_selection()
+        self._base_label.configure(text=f"Base: {EnginePanel.describe_selection(sel)}" if sel else "")
 
         secs = self._clip_seconds()
         n = len(self._clips)
@@ -730,9 +809,10 @@ class CloneVoiceGroup:
             return
         clips = [p for p, _ in self._clips]
         eng, voice, eng_settings = self._base_voice()
+        base_sel = self._engine_selection()      # restored when the voice is switched on
         if mode == "Quick":
             self._run("Create voice", "Preparing the reference voice…",
-                      lambda: self._do_quick(name, clips, eng, voice))
+                      lambda: self._do_quick(name, clips, eng, voice, base_sel))
         else:
             if self.app._is_generating:
                 messagebox.showinfo("Busy", "Wait for the current generation to finish, then start training.",
@@ -741,7 +821,7 @@ class CloneVoiceGroup:
             opts = dict(epochs=int(round(self.epochs_var.get())), batch_size=int(self.batch_var.get()),
                         sample_rate=SR_CHOICES[self.sr_var.get()], match=bool(self.match_var.get()))
             self._run("Training", "Starting…",
-                      lambda: self._do_train(name, clips, eng, voice, eng_settings, opts))
+                      lambda: self._do_train(name, clips, eng, voice, eng_settings, opts, base_sel))
 
     def _finish_new_voice(self, p, msg):
         def ui():
@@ -756,8 +836,8 @@ class CloneVoiceGroup:
         self._ui(ui)
         return f"✅  {msg}"
 
-    def _do_quick(self, name, clips, eng, voice):
-        p = library.create_voice(name, "seedvc", clips, eng, voice)
+    def _do_quick(self, name, clips, eng, voice, base_sel=None):
+        p = library.create_voice(name, "seedvc", clips, eng, voice, base_selection=base_sel)
         try:
             self._ui(self._set_progress, 0.3, "Trimming silence and building the reference…")
             library.build_seedvc_reference(p)
@@ -775,9 +855,9 @@ class CloneVoiceGroup:
         p = library.import_rvc_model(name, pth, index, info)
         return self._finish_new_voice(p, f"Voice '{name}' imported ({info['sample_rate'] // 1000} kHz model).")
 
-    def _do_train(self, name, clips, eng, voice, eng_settings, opts):
+    def _do_train(self, name, clips, eng, voice, eng_settings, opts, base_sel=None):
         from core.voice_cloning import get_client
-        p = library.create_voice(name, "rvc", clips, eng, voice)
+        p = library.create_voice(name, "rvc", clips, eng, voice, base_selection=base_sel)
         t0 = time.monotonic()
         est = estimate.training_seconds(p.total_seconds, opts["epochs"], opts["batch_size"], opts["sample_rate"])
         try:
