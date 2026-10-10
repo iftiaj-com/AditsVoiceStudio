@@ -256,12 +256,16 @@ class CloneVoiceGroup:
         # clips
         self._clips_row = ctk.CTkFrame(page, fg_color="transparent")
         self._clips_row.grid(row=3, column=0, sticky="ew", pady=(6, 2))
-        _btn(self._clips_row, "📥  Add clips", self._on_add_clips, COLORS["accent_primary"],
+        clip_btns = ctk.CTkFrame(self._clips_row, fg_color="transparent")
+        clip_btns.pack(fill="x")
+        _btn(clip_btns, "📥  Add clips", self._on_add_clips, COLORS["accent_primary"],
              width=110).pack(side="left", padx=(0, 6))
-        _btn(self._clips_row, "✖  Clear", self._on_clear_clips, COLORS["error"],
-             width=80).pack(side="left", padx=(0, 8))
-        self._clips_label = _small(self._clips_row, "No clips", COLORS["text_muted"])
-        self._clips_label.pack(side="left")
+        self._record_btn = _btn(clip_btns, "🎙  Record", self._on_record, COLORS["accent_secondary"], width=100)
+        self._record_btn.pack(side="left", padx=(0, 6))
+        _btn(clip_btns, "✖  Clear", self._on_clear_clips, COLORS["error"],
+             width=80).pack(side="left")
+        self._clips_label = _small(self._clips_row, "No clips", COLORS["text_muted"], anchor="w")
+        self._clips_label.pack(fill="x", anchor="w", pady=(4, 0))
 
         self._build_prep(page)
 
@@ -878,6 +882,22 @@ class CloneVoiceGroup:
         if not self._name_entry.get().strip() and self._clips:
             self._name_entry.insert(0, os.path.splitext(os.path.basename(self._clips[0]["path"]))[0][:40])
         self._update_create()
+
+    def _on_record(self):
+        """Record a clip with the microphone; the take is added like an imported file."""
+        from ui.panels.record_dialog import RecordDialog
+        win = getattr(self, "_recorder", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+
+        def done(path, seconds):
+            self._clips.append({"path": path, "seconds": round(seconds, 2), "start": None, "end": None})
+            if not self._name_entry.get().strip():
+                self._name_entry.insert(0, "My voice")
+            self._cleanup_preview = None
+            self._update_create()
+        self._recorder = RecordDialog(self.app, str(runtime.runtime_root() / "recordings"), on_done=done)
 
     def _on_clear_clips(self):
         self._clips = []

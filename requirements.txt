@@ -9,6 +9,7 @@ numpy>=1.24.0
 Pillow>=10.0.0
 librosa>=0.9.1
 soundfile>=0.12.0
+PyAudio>=0.2.14          # Clone Voice: record clips from the microphone
 
 # ── Engine 1: gTTS (Google Translate) ───────────────────────────
 gTTS>=2.3.0

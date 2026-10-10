@@ -81,6 +81,7 @@ Below is the directory structure mapping each component of the VoiceCraft applic
 | `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
 | `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
 | `    ├── clone_voice_dialog.py` | GUI Widget | Rename / delete window opened by the ✏️ button in the Cloned Voices header. |
+| `    ├── record_dialog.py` | GUI Widget | Microphone recorder for clone clips: device picker, level meter, live waveform, preview with seek, Add to clips. |
 | `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
 | **`vc_runtime/`** | Directory | Code that runs **inside** the voice-cloning venvs and is never imported by the app: `worker.py`, `vc_common.py`, `rvc_backend.py`, `seedvc_backend.py`, `train_site/sitecustomize.py`, and the pinned `requirements-*.txt` / `.lock.txt`. |
@@ -339,6 +340,13 @@ There are three ways to make a voice:
 * **Voice Effects → Cloned Voices → ✏️:** rename or delete voices. Unfinished and
   failed voices are listed too, so they can be cleaned up.
 * Settings are saved to the voice's `profile.json` as the sliders move.
+* **🎙 Record** (between Add clips and Clear) opens `RecordDialog`: pick a
+  microphone (default host API, default device first), record with a live level
+  meter and waveform (auto-stop at 10 minutes), then preview with ▶/⏸, a seek
+  slider or a click on the waveform, and **Add to clips**, **Record again** or
+  **Discard**. Takes are 16-bit mono WAV in `<root>ecordings\` (gitignored with
+  the runtime root) and become normal clips, so trim and cleanup apply to them.
+  Capture uses PyAudio (`requirements.txt`, and `_REQUIRED` in `build_exe.py`).
 * **Base voice.** A clone sounds best when converted from the engine voice it was
   made with. Creating a voice stores the TTS Engine dropdown values in
   `profile.base_selection` (engine, Kokoro language, voice, and speed: Kokoro /

@@ -43,6 +43,8 @@ _REQUIRED = {
     "faster_whisper": "word-level subtitles",
     "customtkinter":  "GUI",
     "soundfile":      "audio I/O and MP3 export",
+    "pyaudio":        "Clone Voice microphone recording",
+    "av":             "Clone Voice clip import (M4A, AAC, WebM, WMA...)",
 }
 
 # Left out of the public build on purpose:
