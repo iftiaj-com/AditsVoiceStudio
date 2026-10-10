@@ -62,3 +62,6 @@ scratch/
 Voices-training/
 test_*.py
 test_*.wav
+
+# Voice cloning runtime (venvs, Applio, seed-vc, voices) - see agent.md
+vc_runtime_data/

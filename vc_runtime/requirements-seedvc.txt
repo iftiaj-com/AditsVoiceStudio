@@ -1,0 +1,23 @@
+# Seed-VC runtime venv (seed-vc @ 51383efd, repo archived). Python 3.11.
+# Install torch first from the CUDA index, then this file:
+#   python -m pip install torch==2.4.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu121
+#   python -m pip install -r requirements-seedvc.txt
+# Pins copied from seed-vc/requirements.txt, minus the nightly torch lines.
+# Dropped: torchvision, gradio, FreeSimpleGUI (UI), resemblyzer, jiwer,
+# modelscope, funasr (evaluation scripts only).
+torch==2.4.0
+torchaudio==2.4.0
+accelerate
+scipy==1.13.1
+librosa==0.10.2
+huggingface-hub>=0.28.1
+munch==4.0.0
+einops==0.8.0
+descript-audio-codec==1.0.0
+pydub==0.25.1
+transformers==4.46.3
+soundfile==0.12.1
+numpy==1.26.4
+hydra-core==1.3.2
+pyyaml
+python-dotenv
