@@ -15,6 +15,7 @@ from tkinter import messagebox
 import customtkinter as ctk
 
 from core.constants import COLORS, FONTS
+from ui.theme import use_app_icon
 from core.voice_cloning import library, runtime
 
 
@@ -32,6 +33,7 @@ def _folder_mb(path):
 class ManageVoicesDialog(ctk.CTkToplevel):
     def __init__(self, app):
         super().__init__(app)
+        use_app_icon(self)
         self.app = app
         self.title("Cloned Voices")
         self.configure(fg_color=COLORS["bg_dark"])

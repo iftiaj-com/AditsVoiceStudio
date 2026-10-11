@@ -22,6 +22,7 @@ import customtkinter as ctk
 import numpy as np
 
 from core.constants import COLORS, FONTS
+from ui.theme import use_app_icon
 
 MIN_LEN = 0.5          # shortest selection, seconds
 HANDLE_PX = 7          # grab distance for the edges
@@ -36,6 +37,7 @@ def _fmt(t):
 class TimelineDialog(ctk.CTkToplevel):
     def __init__(self, master, path, start=None, end=None, on_done=None, quick_lengths=(10, 20, 25)):
         super().__init__(master)
+        use_app_icon(self)
         self.title(f"Select audio · {os.path.basename(path)}")
         self.configure(fg_color=COLORS["bg_dark"])
         self.geometry("860x420")

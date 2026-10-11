@@ -166,6 +166,7 @@ class CloneVoiceGroup:
         self._index = None
         self._tmp_dirs = []
         self._preview_sound = None
+        self._preview_playing = None    # 0 (▶ Original) or 1 (▶ Cleaned) while it plays
         self._width = 0                 # box width in unscaled pixels
         self._wide = True
         self._layout_key = None
@@ -1033,6 +1034,8 @@ class CloneVoiceGroup:
         return name, str(voice), s
 
     def _update_create(self):
+        if not self._cleanup_preview and self._preview_playing is not None:
+            self._stop_preview()            # the preview was discarded and its buttons hide
         mode = self._mode_var.get()
         from ui.panels.engine_panel import EnginePanel
         sel = self._engine_selection()
@@ -1517,25 +1520,69 @@ class CloneVoiceGroup:
 
             def ui():
                 self._update_create()          # shows ▶ Original / ▶ Cleaned
-                self._play(res["out"])
+                self._play_preview(1)
             self._ui(ui)
             return (f"▶  Playing the cleaned audio ({end - start:.0f} s, music removed in "
                     f"{res['elapsed']:.0f} s). Compare with ▶ Original.")
         self._run("Cleanup preview", "Removing background music from a sample…", work)
 
+    _PREVIEW_IDLE = ("▶ Original", "▶ Cleaned")
+
+    def _preview_btns(self):
+        return (self._play_orig_btn, self._play_clean_btn)
+
     def _play_preview(self, which):
-        if self._cleanup_preview:
-            self._play(self._cleanup_preview[which])
+        """▶ Original / ▶ Cleaned are play / stop toggles on one channel."""
+        same = self._preview_playing == which
+        self._stop_preview()
+        if same or not self._cleanup_preview:
+            return                      # second click on the playing button: stop only
+        if not self._play(self._cleanup_preview[which]):
+            return
+        self._preview_playing = which
+        self._preview_btns()[which].configure(text="■ Stop")
+        self.app.after(200, self._watch_preview)
+
+    def _watch_preview(self):
+        """Reset the button when the audio ends on its own."""
+        if self._preview_playing is None:
+            return
+        try:
+            import pygame
+            busy = pygame.mixer.get_init() and pygame.mixer.Channel(2).get_busy()
+        except Exception:
+            busy = False
+        if busy:
+            self.app.after(200, self._watch_preview)
+        else:
+            self._stop_preview()
+
+    def _stop_preview(self):
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                pygame.mixer.Channel(2).stop()
+        except Exception:
+            pass
+        self._preview_playing = None
+        for b, text in zip(self._preview_btns(), self._PREVIEW_IDLE):
+            try:
+                if b.winfo_exists():
+                    b.configure(text=text)
+            except Exception:
+                pass
 
     def _play(self, path):
         try:
             import pygame
             if not pygame.mixer.get_init():
-                return
+                return False
             self._preview_sound = pygame.mixer.Sound(path)
             pygame.mixer.Channel(2).play(self._preview_sound)
+            return True
         except Exception as e:
             print(f"Preview playback failed: {e}")
+            return False
 
     def cleanup(self):
         self._cancel.set()

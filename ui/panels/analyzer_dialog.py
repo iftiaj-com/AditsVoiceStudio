@@ -31,6 +31,7 @@ import threading
 import customtkinter as ctk
 
 from core.constants import COLORS, FONTS
+from ui.theme import use_app_icon
 from core.voice_cloning import voicematch
 from core.voice_cloning.errors import VCCancelled, VCError
 
@@ -41,6 +42,7 @@ PLAY_CHANNEL = 5
 class AnalyzerDialog(ctk.CTkToplevel):
     def __init__(self, app, selections, clean=False, denoise=False, on_applied=None, gender="auto"):
         super().__init__(app)
+        use_app_icon(self)
         self.app = app
         self.selections = selections
         self.gender_mode = gender if gender in voicematch.GENDERS else "auto"
