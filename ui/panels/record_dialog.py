@@ -25,6 +25,7 @@ import customtkinter as ctk
 import numpy as np
 
 from core.constants import COLORS, FONTS
+from ui.theme import use_app_icon
 
 MAX_SECONDS = 600            # stop automatically after 10 minutes
 CHUNK = 1024
@@ -39,6 +40,7 @@ def _fmt(t):
 class RecordDialog(ctk.CTkToplevel):
     def __init__(self, master, out_dir, on_done=None):
         super().__init__(master)
+        use_app_icon(self)
         self.title("Record a clip")
         self.configure(fg_color=COLORS["bg_dark"])
         self.geometry("720x430")

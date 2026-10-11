@@ -9,6 +9,26 @@ import customtkinter as ctk
 from core.constants import COLORS, FONTS
 
 
+def use_app_icon(win):
+    """Give a pop-up window the app icon instead of CustomTkinter's blue one.
+
+    CTkToplevel sets its own icon 200 ms after it is created, whatever was set
+    before (customtkinter/windows/ctk_toplevel.py), so ours goes on after that.
+    """
+    from core import paths
+    ico = paths.bundle_dir() / "assets" / "adits_voice_studio.ico"
+    if not ico.exists():
+        return
+
+    def apply():
+        try:
+            if win.winfo_exists():
+                win.iconbitmap(str(ico))
+        except Exception:
+            pass
+    win.after(250, apply)
+
+
 def card(parent, row: int, title: str) -> ctk.CTkFrame:
     """Create a styled card frame with a section title and return it."""
     frame = ctk.CTkFrame(
