@@ -19,8 +19,17 @@ Clip analysis
 
 Ranking
     Candidates in the clip's language (when Whisper is confident and the bank
-    has that language), scored by voiceprint similarity minus a small pitch
-    penalty: score = cosine - 0.015 x |semitones apart|.
+    has that language) and of the clip's gender, scored by voiceprint
+    similarity minus a small pitch penalty: score = cosine - 0.015 x
+    |semitones apart|. The gender is the user's choice (Male / Female) or, in
+    Auto, decided from the clip (decide_gender).
+
+Gender
+    A bank voice's gender comes from what is known about it (Kokoro's
+    af_/am_/bf_/bm_ prefix, the Piper dataset, MeloTTS English, Windows voice
+    names), and from its pitch only when nothing else is known. Pitch alone is
+    not enough: in the bank af_alloy measures 142 Hz while am_eric and
+    am_santa measure 154-155 Hz.
 
 Nothing here imports torch; the voiceprints come from the worker.
 """
@@ -39,6 +48,19 @@ from core.voice_cloning import runtime
 BANK_SCHEMA = 1
 PITCH_PENALTY = 0.015          # score lost per semitone of pitch difference
 LANG_CONFIDENCE = 0.6          # Whisper language probability needed to filter by language
+GENDERS = ("auto", "male", "female")
+# Clip pitch bands for Auto. Between them the voiceprint decides (decide_gender).
+CLIP_MALE_BELOW = 145.0
+CLIP_FEMALE_ABOVE = 180.0
+VOICE_GENDER_SPLIT = 165.0     # bank voices with no known gender: below = male
+# pYIN parks breathy, whispered or music-backed frames at its 65 Hz floor. Measured:
+# Video-8115.mp4 had 54% of its voiced frames under 75 Hz (median 69 Hz) while its
+# voiceprint is clearly female. Past this share the median is not trusted.
+F0_FLOOR_HZ = 75.0
+F0_FLOOR_SHARE = 0.3
+# Voiceprint vote: below this gap between the male and female scores Auto compares
+# all voices. Measured gaps on real clips: 0.04 to 0.17, one unclear clip 0.01.
+GENDER_MARGIN = 0.02
 
 # One sentence per language, ~5-7 s at speed 1.0. Changing a sentence changes
 # the bank version, so the bank is rebuilt.
@@ -290,10 +312,12 @@ def rate(text, lang, path):
     return round(n / secs, 2) if secs > 0.5 and n else None
 
 
-def gender_guess(f0):
+def gender_guess(f0, unsure=False):
     """A rough label from median pitch only. Pitch overlaps between groups."""
     if not f0:
         return "unknown"
+    if unsure:
+        return "pitch unsteady, not used for gender"
     if f0 < 145:
         return "likely male"
     if f0 < 175:
@@ -301,6 +325,90 @@ def gender_guess(f0):
     if f0 < 255:
         return "likely female"
     return "high: likely female or a child"
+
+
+# Known engine voice genders. Piper names its voices after the training dataset.
+# LJSpeech, Lessac, Amy, Kathleen, Kristin, Jenny (Dioco) are female speakers;
+# Ryan, Joe, John, Kusal, Alan, Northern English Male are male.
+_PIPER_GENDER = {"ljspeech": "female", "lessac": "female", "amy": "female", "kathleen": "female",
+                 "kristin": "female", "jenny_dioco": "female", "hfc_female": "female",
+                 "ryan": "male", "joe": "male", "john": "male", "kusal": "male", "alan": "male",
+                 "hfc_male": "male", "norman": "male", "northern_english_male": "male"}
+# Windows (SAPI5 / OneCore) voice first names.
+_SYSTEM_GENDER = {"david": "male", "mark": "male", "george": "male", "james": "male", "richard": "male",
+                  "ravi": "male", "sean": "male", "guy": "male",
+                  "zira": "female", "hazel": "female", "susan": "female", "heera": "female",
+                  "catherine": "female", "linda": "female", "eva": "female", "aria": "female",
+                  "jenny": "female", "helen": "female"}
+
+
+def voice_gender(vid, entry):
+    """'male' or 'female' for a bank voice (None when unknown and unmeasured)."""
+    kind = entry.get("kind")
+    if kind == "kokoro":
+        voice = vid.rsplit(":", 1)[-1]
+        if len(voice) > 1 and voice[1] in "fm":
+            return "female" if voice[1] == "f" else "male"
+    elif kind == "melo" and entry.get("lang") == "en":
+        return "female"                       # all five English speakers (bank: 171-234 Hz)
+    elif kind == "piper":
+        key = vid.split(":", 1)[-1].lower()
+        name = key.split("-")[1] if key.count("-") >= 2 else key
+        if name in _PIPER_GENDER:
+            return _PIPER_GENDER[name]
+    elif kind == "pyttsx3":
+        words = re.findall(r"[a-z]+", (entry.get("label") or "").lower())
+        if "female" in words or "woman" in words:
+            return "female"
+        if "male" in words or "man" in words:
+            return "male"
+        for w in words:
+            if w in _SYSTEM_GENDER:
+                return _SYSTEM_GENDER[w]
+    f0 = entry.get("f0")
+    if f0:
+        return "male" if f0 < VOICE_GENDER_SPLIT else "female"
+    return None
+
+
+def decide_gender(bank, cands, clip):
+    """Auto mode: (gender, reason) for the clip, gender 'male', 'female' or None.
+
+    Clear pitch decides on its own. In the overlap band (145-180 Hz) the clip's
+    voiceprint is compared with the bank: the mean similarity of the 3 closest
+    male voices against the 3 closest female voices.
+    """
+    import numpy as np
+    f0 = clip.get("f0")
+    if clip.get("f0_unsure"):
+        f0 = None                             # many frames at the tracker's floor: voiceprint decides
+    if f0 and f0 < CLIP_MALE_BELOW:
+        return "male", f"pitch {f0:.0f} Hz"
+    if f0 and f0 > CLIP_FEMALE_ABOVE:
+        return "female", f"pitch {f0:.0f} Hz"
+    if not clip.get("emb"):
+        if f0:
+            return ("male" if f0 < VOICE_GENDER_SPLIT else "female"), f"pitch {f0:.0f} Hz (unclear)"
+        return None, "pitch not measured"
+    c = np.asarray(clip["emb"], dtype=np.float32)
+    ids = {x["id"] for x in cands}
+    sims = {"male": [], "female": []}
+    for vid, e in bank["voices"].items():
+        g = voice_gender(vid, e)
+        if vid in ids and e.get("emb") and g in sims:
+            sims[g].append(float(np.dot(c, np.asarray(e["emb"], dtype=np.float32))))
+    top = {g: (sum(sorted(v, reverse=True)[:3]) / min(3, len(v)) if v else None) for g, v in sims.items()}
+    pitch = (f"pitch {f0:.0f} Hz is in between" if f0
+             else "pitch unsteady" if clip.get("f0_unsure") else "pitch not measured")
+    if top["male"] is None or top["female"] is None:
+        if f0:
+            return ("male" if f0 < VOICE_GENDER_SPLIT else "female"), f"{pitch}, decided by pitch"
+        return None, pitch
+    if abs(top["male"] - top["female"]) < GENDER_MARGIN:
+        return None, (f"{pitch}, voiceprint unclear ({top['male']:.2f} male vs {top['female']:.2f} female), "
+                      "comparing all voices. Pick Male or Female to choose")
+    g = "male" if top["male"] > top["female"] else "female"
+    return g, f"{pitch}, voiceprint closer to {g} voices ({top[g]:.2f} vs {top['female' if g == 'male' else 'male']:.2f})"
 
 
 def rate_unit(lang):
@@ -392,12 +500,23 @@ def _cancelled(check_cancel):
 # ── clip analysis and ranking ───────────────────────────────────────
 
 def analyze_clip(path, embed_fn, progress=None):
-    """{"f0", "gender", "lang", "lang_prob", "rate", "text", "emb", "seconds"} for one prepared WAV."""
+    """{"f0", "f0_unsure", "gender", "lang", "lang_prob", "rate", "text", "emb", "seconds"} for one WAV.
+
+    f0_unsure: over F0_FLOOR_SHARE of the voiced frames sit at the tracker's
+    floor; f0 is then the median of the frames above it.
+    """
     from core.subtitles import get_whisper_model
     from core.voice_cloning import pitch as pitch_mod
     say = progress or (lambda f, m: None)
+    import numpy as np
     say(0.1, "Measuring pitch…")
-    f0 = pitch_mod.median_f0(str(path), max_seconds=45)
+    frames = pitch_mod.voiced_f0(str(path), max_seconds=45)
+    f0, unsure = (float(np.median(frames)) if frames.size >= 20 else None), False
+    if f0 and float(np.mean(frames < F0_FLOOR_HZ)) > F0_FLOOR_SHARE:
+        unsure = True
+        above = frames[frames >= F0_FLOOR_HZ]
+        if above.size >= 20:
+            f0 = float(np.median(above))
     say(0.35, "Transcribing to measure speaking speed and language…")
     model = get_whisper_model()
     segments, info = model.transcribe(str(path), vad_filter=True)
@@ -405,7 +524,7 @@ def analyze_clip(path, embed_fn, progress=None):
     lang = info.language
     say(0.75, "Measuring the voiceprint…")
     emb = embed_fn(str(path))
-    return {"f0": f0, "gender": gender_guess(f0), "lang": lang,
+    return {"f0": f0, "f0_unsure": unsure, "gender": gender_guess(f0, unsure), "lang": lang,
             "lang_prob": round(float(info.language_probability or 0), 2),
             "rate": rate(text, lang, str(path)), "text": text, "emb": emb,
             "seconds": round(speech_seconds(str(path)), 1)}
@@ -428,11 +547,16 @@ def suggested_speed(entry, clip):
     return None
 
 
-def rank(bank, cands, clip, top=3):
-    """Top matches: [{"id", "label", "score", "sim", "st", "speed", "selection", "reason", "f0", "wav"}]."""
+def rank(bank, cands, clip, top=3, gender=None):
+    """Top matches: [{"id", "label", "score", "sim", "st", "speed", "selection", "reason", "f0", "wav", "gender"}].
+
+    gender: 'male' or 'female' keeps only those voices; None compares all.
+    """
     import numpy as np
     ids = {c["id"] for c in cands}
     pool = [(vid, e) for vid, e in bank["voices"].items() if vid in ids and e.get("emb")]
+    if gender:
+        pool = [(vid, e) for vid, e in pool if voice_gender(vid, e) == gender]
     lang = clip.get("lang")
     if lang and clip.get("lang_prob", 0) >= LANG_CONFIDENCE and any(e.get("lang") == lang for _, e in pool):
         pool = [(vid, e) for vid, e in pool if e.get("lang") == lang]
@@ -460,5 +584,6 @@ def rank(bank, cands, clip, top=3):
             sel["speed"] = speed
         out.append({"id": vid, "label": e["label"], "score": round(score, 3), "sim": round(sim, 3),
                     "st": None if st is None else round(st, 1), "speed": speed, "selection": sel,
-                    "reason": ", ".join(parts), "f0": e.get("f0"), "wav": e.get("wav"), "lang": e.get("lang")})
+                    "reason": ", ".join(parts), "f0": e.get("f0"), "wav": e.get("wav"), "lang": e.get("lang"),
+                    "gender": voice_gender(vid, e)})
     return out

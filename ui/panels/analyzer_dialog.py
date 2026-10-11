@@ -8,13 +8,17 @@ Opened by 🔍 Analyze in Customization → Clone Voice → Create voice. One ru
   2. Measures the selected clip audio (after trim, and after music removal
      when that switch is on): pitch, rough gender guess, speaking speed,
      language, voiceprint.
-  3. Shortlists the 3 English engine voices closest to the clip.
-  4. Test-clones a sentence from each with Seed-VC (the clip is the reference)
-     and ranks them by how close each cloned result sounds to the clip:
-     1. Best match, 2. and 3. Close match.
+  3. Picks the gender to match: the user's Male / Female choice, or in Auto
+     the clip's own (voicematch.decide_gender). Only voices of that gender
+     are compared.
+  4. Shortlists the 3 English engine voices closest to the clip.
+  5. Test-clones a sentence from each with Seed-VC (the clip is the reference)
+     and ranks them by how close each cloned result sounds to the clip, minus
+     the same pitch penalty as the shortlist: 1. Best match, 2. and 3. Close match.
 
-Each row: ▶ Sample (the engine voice) and ▶ Result (its cloned test), both
-play/stop toggles, and Apply, which selects engine, voice and a speed that
+Each row: ▶ Sample (the engine voice), ▶ Original (the user's clip as it was
+measured: trimmed, and cleaned when music removal is on) and ▶ Result (its
+cloned test), all play/stop toggles, and Apply, which selects engine, voice and a speed that
 matches the clip's pace (EnginePanel.apply_voice_selection) and closes the
 window. The user can still change the controls afterwards.
 """
@@ -35,22 +39,26 @@ PLAY_CHANNEL = 5
 
 
 class AnalyzerDialog(ctk.CTkToplevel):
-    def __init__(self, app, selections, clean=False, denoise=False, on_applied=None):
+    def __init__(self, app, selections, clean=False, denoise=False, on_applied=None, gender="auto"):
         super().__init__(app)
         self.app = app
         self.selections = selections
+        self.gender_mode = gender if gender in voicematch.GENDERS else "auto"
+        self._gender = None           # the gender actually matched: "male", "female" or None (all)
+        self._gender_note = ""
         self.clean = clean
         self.denoise = denoise
         self.on_applied = on_applied
         self.title("Voice match")
         self.configure(fg_color=COLORS["bg_dark"])
-        self.geometry("760x560")
+        self.geometry("840x560")
         self.minsize(640, 480)
         self.transient(app)
         self._cancel = threading.Event()
         self._busy = False
         self._tmp = tempfile.mkdtemp(prefix="adits_vs_match_")
         self._clip = None
+        self._clip_wav = None         # the prepared clip (trim, music removal), played by ▶ Original
         self._ranked = []
         self._sound = None
         self._playing = None          # (key, button, idle_text) of the clip being played
@@ -191,12 +199,20 @@ class AnalyzerDialog(ctk.CTkToplevel):
             self._check()
             self._ui(self._progress, 0.46, "Preparing your clip…")
             clip_wav = self._prepare_clip()
+            self._clip_wav = clip_wav
             self._check()
             clip = voicematch.analyze_clip(
                 clip_wav, embed_fn=lambda p: (client.embed([p], cancel_event=self._cancel) or [None])[0],
                 progress=lambda f, m: self._ui(self._progress, 0.48 + 0.12 * f, m))
+            if self.gender_mode == "auto":
+                gender, why = voicematch.decide_gender(bank, cands, clip)
+                self._gender_note = f"Auto: {why}"
+            else:
+                gender = self.gender_mode
+                self._gender_note = "your choice"
+            self._gender = gender
             self._ui(self._show_clip, clip)
-            shortlist = voicematch.rank(bank, cands, clip)
+            shortlist = voicematch.rank(bank, cands, clip, gender=gender)
             if not shortlist:
                 return clip, [], None
 
@@ -218,7 +234,9 @@ class AnalyzerDialog(ctk.CTkToplevel):
                 c = np.asarray(clip["emb"], dtype=np.float32)
                 for m, out, e in zip(shortlist, outs, client.embed(outs, cancel_event=self._cancel)):
                     m["result"] = out
-                    m["final"] = float(np.dot(c, np.asarray(e, dtype=np.float32))) if e else -1.0
+                    # the result takes the clip's timbre whatever the source, so keep the pitch penalty
+                    sim = float(np.dot(c, np.asarray(e, dtype=np.float32))) if e else -1.0
+                    m["final"] = sim - voicematch.PITCH_PENALTY * (m.get("st") or 0)
                 shortlist.sort(key=lambda m: m["final"], reverse=True)
             except VCCancelled:
                 raise
@@ -246,6 +264,15 @@ class AnalyzerDialog(ctk.CTkToplevel):
         f0 = f"{clip['f0']:.0f} Hz" if clip.get("f0") else "not measured"
         text = (f"Pitch {f0} ({clip['gender']}) · speaking speed {speed} · {lang} "
                 f"({clip['lang_prob'] * 100:.0f}% sure) · {clip['seconds']} s of speech measured")
+        if self._gender:
+            text += f"\nMatching {self._gender} voices only ({self._gender_note})."
+        else:
+            text += f"\nMatching all voices ({self._gender_note})."
+        f0_hz = clip.get("f0")
+        if self.gender_mode != "auto" and f0_hz and not clip.get("f0_unsure") and (
+                (self._gender == "male" and f0_hz > voicematch.CLIP_FEMALE_ABOVE)
+                or (self._gender == "female" and f0_hz < voicematch.CLIP_MALE_BELOW)):
+            text += f"\n⚠  The clip's pitch ({f0_hz:.0f} Hz) sounds {'female' if self._gender == 'male' else 'male'}."
         if clip.get("lang") and clip["lang"] != "en" and clip.get("lang_prob", 0) >= voicematch.LANG_CONFIDENCE:
             text += (f"\n⚠  The clip sounds like {lang}. Voice match compares English voices only, "
                      "so treat the matches as rough.")
@@ -263,7 +290,8 @@ class AnalyzerDialog(ctk.CTkToplevel):
         for w in self._list.winfo_children():
             w.destroy()
         if not self._ranked:
-            ctk.CTkLabel(self._list, text="No matching English engine voice was found.", font=FONTS["body"],
+            who = f"{self._gender} " if self._gender else ""
+            ctk.CTkLabel(self._list, text=f"No matching English {who}engine voice was found.", font=FONTS["body"],
                          text_color=COLORS["text_muted"]).pack(anchor="w", pady=10)
             return
         clip_f0 = (self._clip or {}).get("f0")
@@ -293,6 +321,9 @@ class AnalyzerDialog(ctk.CTkToplevel):
             btns.pack(side="right", padx=10)
             sample = os.path.join(voicematch.bank_dir(), "samples", m["wav"])
             self._play_button(btns, f"sample:{m['id']}", "▶ Sample", sample, COLORS["text_muted"])
+            if self._clip_wav:
+                self._play_button(btns, f"original:{m['id']}", "▶ Original", self._clip_wav,
+                                  COLORS["accent_secondary"])
             if m.get("result"):
                 self._play_button(btns, f"result:{m['id']}", "▶ Result", m["result"], COLORS["success"])
             ctk.CTkButton(btns, text="Apply", font=FONTS["button"], width=70, height=28, corner_radius=8,

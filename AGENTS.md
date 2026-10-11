@@ -442,19 +442,38 @@ from the clip, to use as the base voice.
    when that is on), up to 60 s: pitch with a rough gender guess, speaking
    speed and language (faster-whisper, `core.subtitles.get_whisper_model`), and
    voiceprint.
-3. **Shortlist:** the 3 voices with the highest voiceprint similarity minus
-   0.015 per semitone of pitch difference.
-4. **Test-clone and rank:** each shortlisted sample is converted with Seed-VC,
+3. **Gender.** The **Auto / Male / Female** row under the Recordings buttons
+   (default Auto) picks which bank voices are compared. Male and Female are the
+   user's choice. Auto (`voicematch.decide_gender()`) uses the clip's pitch when
+   it is clear (under 145 Hz male, over 180 Hz female), and otherwise the
+   voiceprint: the mean similarity of the 3 closest male bank voices against
+   the 3 closest female ones. A gap under 0.02 compares all voices.
+   A bank voice's gender comes from what is known about it
+   (`voicematch.voice_gender()`: Kokoro `af_` / `am_` / `bf_` / `bm_`, Piper
+   dataset name, MeloTTS English, Windows voice names), and from its pitch only
+   when nothing is known. Pitch alone is not enough: `af_alloy` measures 142 Hz,
+   `am_eric` and `am_santa` 154 to 155 Hz.
+   The clip's pitch is marked unsteady when over 30% of its voiced frames sit
+   under 75 Hz (pYIN's floor is 65 Hz); its pitch is then the median of the
+   frames above that, and Auto does not use it. Measured: `Video-8115.mp4` and
+   `Radio-voice.mp3` had 54% and 63% of frames at the floor and read as about
+   70 Hz "likely male", while their voiceprints were clearly female.
+4. **Shortlist:** the 3 voices of that gender with the highest voiceprint
+   similarity minus 0.015 per semitone of pitch difference.
+5. **Test-clone and rank:** each shortlisted sample is converted with Seed-VC,
    using the clip (silences removed, 25 s) as the reference, and the result's
-   voiceprint is compared with the clip. Rows are ordered by that score:
+   voiceprint is compared with the clip, minus the same pitch penalty (the
+   converted result takes the clip's timbre whatever the source, so similarity
+   alone does not tell the sources apart by pitch). Rows are ordered by that score:
    **1. Best match**, then **2.** and **3. Close match**. If the test-clone is
    not possible (for example while a voice trains), the shortlist order is kept
    and the window says so.
 
 Each row shows pitch against the clip and a suggested speed (Kokoro / Melo
 speed, pyttsx3 WPM) so the voice talks at the clip's pace. **▶ Sample** plays
-the engine voice and **▶ Result** its cloned test; both are play / stop toggles
-on one channel. **Apply** calls `EnginePanel.apply_voice_selection()` and closes
+the engine voice, **▶ Original** the clip as it was analyzed (trimmed, and
+cleaned when music removal is on, up to 60 s) and **▶ Result** its cloned
+test; all are play / stop toggles on one channel. **Apply** calls `EnginePanel.apply_voice_selection()` and closes
 the window; the controls stay editable.
 
 Measured on the Arjun clip (bank already built): about 2.3 minutes per run.

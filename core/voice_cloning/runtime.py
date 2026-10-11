@@ -107,6 +107,21 @@ def save_settings(data: dict) -> None:
 
 
 def default_root() -> Path:
+    candidates = []
+    if paths.FROZEN:
+        exe_dir = Path(sys.executable).parent
+        candidates.extend([
+            paths.user_root() / "vc_runtime",              # %LOCALAPPDATA%\AditsVoiceStudio\vc_runtime
+            exe_dir / "vc_runtime_data",                   # next to EXE (portable / pre-bundled)
+            exe_dir.parent.parent / "vc_runtime_data",     # repo root from dist\AditsVoiceStudio
+        ])
+    else:
+        candidates.append(paths.bundle_dir() / "vc_runtime_data")
+
+    for c in candidates:
+        if c.is_dir() and (c / "runtime.json").is_file():
+            return c
+
     if paths.FROZEN:
         return paths.user_root() / "vc_runtime"
     return paths.bundle_dir() / "vc_runtime_data"
@@ -143,11 +158,26 @@ def manifest_path() -> Path:
 
 
 def worker_script() -> Path:
-    return paths.bundle_dir() / "vc_runtime" / "worker.py"
+    base = paths.bundle_dir()
+    candidate = base / "vc_runtime" / "worker.py"
+    if candidate.is_file():
+        return candidate
+    candidate_internal = base / "_internal" / "vc_runtime" / "worker.py"
+    if candidate_internal.is_file():
+        return candidate_internal
+    return candidate
 
 
 def requirements_file(engine) -> Path:
-    return paths.bundle_dir() / "vc_runtime" / ENGINES[engine]["requirements"]
+    base = paths.bundle_dir()
+    req_name = ENGINES[engine]["requirements"]
+    candidate = base / "vc_runtime" / req_name
+    if candidate.is_file():
+        return candidate
+    candidate_internal = base / "_internal" / "vc_runtime" / req_name
+    if candidate_internal.is_file():
+        return candidate_internal
+    return candidate
 
 
 def worker_log(engine, role="convert") -> Path:
@@ -240,8 +270,15 @@ def needs_update(engine) -> bool:
 
 
 def frozen_unsupported() -> bool:
-    """The installed EXE has no Python to build venvs from yet (deferred)."""
-    return paths.FROZEN
+    """True only if the runtime is not installed AND the environment cannot install it."""
+    # If any or all engines are already installed, runtime is available!
+    if any(is_installed(name) for name in ENGINES):
+        return False
+    # If running from source, it's always supported
+    if not paths.FROZEN:
+        return False
+    # If frozen, check if the system has the 'py' launcher or python to create the venvs
+    return shutil.which("py") is None and find_base_python("3.12") is None
 
 
 def status() -> dict:
@@ -355,17 +392,29 @@ class _Runner:
 # ── install steps ───────────────────────────────────────────────────
 
 def find_base_python(version: str):
-    """Full path of an installed CPython <version> via the py launcher, or None."""
-    if frozen_unsupported():
-        return None
+    """Full path of an installed CPython <version> via the py launcher or PATH, or None."""
     try:
         out = subprocess.run(["py", f"-{version}", "-c", "import sys; print(sys.executable)"],
                              capture_output=True, text=True, timeout=30,
                              creationflags=CREATE_NO_WINDOW)
         exe = out.stdout.strip().splitlines()[-1] if out.returncode == 0 and out.stdout.strip() else ""
-        return exe if exe and os.path.isfile(exe) else None
+        if exe and os.path.isfile(exe):
+            return exe
     except (OSError, subprocess.SubprocessError, IndexError):
-        return None
+        pass
+
+    # Fallback: check if python on PATH matches the required version
+    for cmd in ([sys.executable] if not paths.FROZEN else []) + [f"python{version}", "python"]:
+        try:
+            out = subprocess.run([cmd, "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}'); print(sys.executable)"],
+                                 capture_output=True, text=True, timeout=10,
+                                 creationflags=CREATE_NO_WINDOW)
+            lines = out.stdout.strip().splitlines()
+            if len(lines) >= 2 and lines[0] == version and os.path.isfile(lines[1]):
+                return lines[1]
+        except (OSError, subprocess.SubprocessError, IndexError):
+            continue
+    return None
 
 
 def _torch_pins(engine):
