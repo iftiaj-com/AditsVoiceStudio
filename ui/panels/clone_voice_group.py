@@ -416,8 +416,17 @@ class CloneVoiceGroup:
                                 "and use it as the base voice.")
         clear = _btn(self._rec_btns, "✖  Clear", self._on_clear_clips, COLORS["error"], width=90)
         self._rec_btn_list = [add, self._record_btn, self._analyze_btn, clear]
+        # which engine voices 🔍 Analyze compares against
+        self._match_gender_var = ctk.StringVar(value="Auto")
+        self._match_gender_seg = self._seg(r, ["Auto", "Male", "Female"], self._match_gender_var,
+                                           lambda v: None, height=30)
+        self._match_gender_seg.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self._seg_tips(self._match_gender_seg, {
+            "Auto": "Analyze decides from the clip whether to compare male or female voices.",
+            "Male": "Analyze compares the clip with male engine voices only.",
+            "Female": "Analyze compares the clip with female engine voices only."})
         self._clips_note = _small(r, "", COLORS["text_muted"], anchor="w", justify="left")
-        self._clips_note.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._clips_note.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self._wraps.append((self._clips_note, lambda w: (w // 2 if self._wide else w) - 40))
 
         # ── Model files tile (Import model) ──
@@ -1145,7 +1154,8 @@ class CloneVoiceGroup:
             return
         self._analyzer = AnalyzerDialog(self.app, self._selections(), clean=bool(self.clean_on.get()),
                                         denoise=bool(self.denoise_var.get()),
-                                        on_applied=lambda sel: self._update_create())
+                                        on_applied=lambda sel: self._update_create(),
+                                        gender=self._match_gender_var.get().lower())
 
     def _on_clear_clips(self):
         self._clips = []
