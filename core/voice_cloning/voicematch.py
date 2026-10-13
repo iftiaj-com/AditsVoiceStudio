@@ -497,6 +497,41 @@ def _cancelled(check_cancel):
         return True
 
 
+_SPEED_KEYS = {"kokoro": "kokoro_speed", "melo": "melo_speed", "pyttsx3": "pyttsx3_rate"}
+
+
+def speak_settings(eng_settings, cand, speed=None) -> dict:
+    """The EnginePanel.get_settings()-style dict speak() uses for *cand* at *speed*."""
+    overrides = dict(cand["overrides"])
+    key = _SPEED_KEYS.get(cand["kind"])
+    if key and speed is not None:
+        overrides[key] = speed
+    return dict(eng_settings, engine_name=cand["engine"], **overrides)
+
+
+def speak(app, eng_settings, cand, text, out_wav, speed=None, check_cancel=None):
+    """Synthesize text with one candidate voice into a mono WAV at out_wav.
+
+    speed: a suggested_speed() value (Kokoro / Melo speed, pyttsx3 WPM); None keeps
+    the candidate's default. Used by the analyzer's Result (the clip's transcript).
+    """
+    import tempfile
+    import torch
+    from core.audio_io import load_segment
+    use_gpu = bool(eng_settings.get("use_gpu")) and torch.cuda.is_available()
+    settings = speak_settings(eng_settings, cand, speed)
+    kwargs = app._engine_kwargs(settings, "cuda" if use_gpu else "cpu", lambda m: None,
+                                lambda: bool(check_cancel and _cancelled(check_cancel)))
+    tmp = tempfile.mkdtemp(prefix="adits_vs_speak_", dir=os.path.dirname(str(out_wav)))
+    try:
+        with app._engine_lock:
+            res = app._engine_map[cand["engine"]].synthesize(text, tmp, **kwargs)
+        load_segment(res["playback_file"]).set_channels(1).export(str(out_wav), format="wav")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return str(out_wav)
+
+
 # ── clip analysis and ranking ───────────────────────────────────────
 
 def analyze_clip(path, embed_fn, progress=None):

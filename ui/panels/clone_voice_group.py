@@ -36,13 +36,13 @@ import customtkinter as ctk
 
 from core.audio_io import AUDIO_EXTENSIONS
 from core.constants import COLORS, FONTS
-from core.voice_cloning import estimate, library, pitch, runtime
+from core.voice_cloning import estimate, library, pitch, previews, runtime
 from core.voice_cloning.errors import VCCancelled, VCError, VCWorkerError
 from ui.theme import styled_slider
 
 CLONE_GROUP = "clone"
 KEY_PREFIX = "clone:"
-PREVIEW_TEXT = "Hello! This is a short preview of my cloned voice."
+PREVIEW_TEXT = previews.TEXT
 AUDIO_TYPES = [("Audio files", " ".join("*" + e for e in AUDIO_EXTENSIONS)), ("All files", "*.*")]
 MODES = ["Quick", "Train (RVC)", "Import model"]
 MODE_HINTS = {
@@ -60,6 +60,7 @@ TRIM_PRESETS = {
     "Train (RVC)": {"1 min": 60, "3 min": 180, "5 min": 300, "Custom": None},
 }
 WIDE_PX = 600                       # two tile columns from this box width up
+CLIP_PLAY_CHANNEL = 6               # pygame channel of the Recordings clip player
 TITLE_FONT = ("Segoe UI", 11, "bold")
 
 
@@ -173,6 +174,16 @@ class CloneVoiceGroup:
         self._custom_key = None
         self._indent = 40               # sub-option indent under a clean-up switch
         self._wraps = []                # (label, width -> wraplength)
+        # Recordings clip player: the clip shown, its decoded audio, and the play position
+        self._pl_labels = {}            # menu text -> clip path
+        self._pl_path = None
+        self._pl_seg = None             # AudioSegment in the mixer's format, decoded on first play
+        self._pl_sound = None
+        self._pl_from = 0.0             # position (s) playback starts from / was paused at
+        self._pl_t0 = None              # monotonic time playback started; None when stopped
+        self._pl_seeking = False
+        self._pl_loading = False
+        self._active_sound = None        # the Active voice ▶ Preview while it plays (button shows ■ Stop)
 
         box = ctk.CTkFrame(container, fg_color=COLORS["bg_input"], corner_radius=10,
                            border_width=1, border_color=COLORS["border"])
@@ -426,8 +437,31 @@ class CloneVoiceGroup:
             "Auto": "Analyze decides from the clip whether to compare male or female voices.",
             "Male": "Analyze compares the clip with male engine voices only.",
             "Female": "Analyze compares the clip with female engine voices only."})
+        # clip player: ▶/⏸, which clip, time; seek bar under them. Shown once a clip is added.
+        pl = ctk.CTkFrame(r, fg_color=COLORS["bg_input"], corner_radius=8)
+        pl.columnconfigure(1, weight=1)
+        self._player = pl
+        self._pl_btn = ctk.CTkButton(pl, text="▶", font=FONTS["button"], width=38, height=26, corner_radius=6,
+                                     fg_color=COLORS["accent_primary"], hover_color=COLORS["accent_secondary"],
+                                     command=self._on_clip_play)
+        self._pl_btn.grid(row=0, column=0, padx=(6, 6), pady=(6, 0))
+        _Tip(self._pl_btn, "Play or pause the clip. Drag the bar below to jump.")
+        self._pl_var = ctk.StringVar(value="")
+        self._pl_menu = ctk.CTkOptionMenu(
+            pl, variable=self._pl_var, values=[""], command=self._on_clip_pick, font=FONTS["body_small"],
+            dropdown_font=FONTS["body_small"], fg_color=COLORS["bg_card"], button_color=COLORS["bg_card"],
+            button_hover_color=COLORS["accent_primary"], dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["accent_primary"], text_color=COLORS["text_primary"],
+            corner_radius=6, height=26, width=100, dynamic_resizing=False)
+        self._pl_menu.grid(row=0, column=1, sticky="ew", pady=(6, 0))
+        self._pl_time = _small(pl, "0:00 / 0:00", COLORS["text_muted"], anchor="e")
+        self._pl_time.grid(row=0, column=2, sticky="e", padx=(6, 8), pady=(6, 0))
+        self._pl_seek_var = ctk.DoubleVar(value=0.0)
+        self._pl_seek = styled_slider(pl, self._pl_seek_var, 0, 1, width=100, command=self._on_clip_slide)
+        self._pl_seek.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(6, 8))
+        self._pl_seek.bind("<ButtonRelease-1>", lambda e: self._clip_seek(self._pl_seek_var.get()), add="+")
         self._clips_note = _small(r, "", COLORS["text_muted"], anchor="w", justify="left")
-        self._clips_note.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self._clips_note.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self._wraps.append((self._clips_note, lambda w: (w // 2 if self._wide else w) - 40))
 
         # ── Model files tile (Import model) ──
@@ -814,6 +848,7 @@ class CloneVoiceGroup:
         self._status.configure(text=text, text_color=color)
 
     def _on_tab(self, value):
+        self._clip_pause()
         if value == "Create voice":
             self._active_page.grid_remove()
             self._create_page.grid()
@@ -841,6 +876,8 @@ class CloneVoiceGroup:
     def _on_active_changed(self, key):
         slug = key[len(KEY_PREFIX):] if key else None
         newly_on = slug is not None and slug != self._active_slug
+        if slug != self._active_slug:
+            self._stop_active_preview()     # it was the other voice's preview
         self._flush_params()
         self._active_slug = slug
         self._active_profile = None
@@ -909,6 +946,24 @@ class CloneVoiceGroup:
             self._active_profile = p
         except (OSError, ValueError) as e:
             print(f"Could not save voice settings: {e}")
+
+    def reload_active(self, p):
+        """Show *p*, the active voice, after it was saved elsewhere (the Cloned Voices window)."""
+        if self._save_job is not None:
+            try:
+                self.app.after_cancel(self._save_job)
+            except Exception:
+                pass
+            self._save_job = None
+        self._active_profile = p
+        for row, var, value in ((self._pitch_row, self.pitch_var, p.pitch),
+                                (self._index_row, self.index_var, p.index_rate),
+                                (self._protect_row, self.protect_var, p.protect),
+                                (self._steps_row, self.steps_var, p.diffusion_steps)):
+            var.set(value)
+            row.value_label.configure(text=row.fmt(value))
+        self._show_base(p)
+        self._update_active_est()
 
     def get_settings(self) -> dict:
         p = self._active_profile
@@ -1036,6 +1091,7 @@ class CloneVoiceGroup:
     def _update_create(self):
         if not self._cleanup_preview and self._preview_playing is not None:
             self._stop_preview()            # the preview was discarded and its buttons hide
+        self._refresh_player()
         mode = self._mode_var.get()
         from ui.panels.engine_panel import EnginePanel
         sel = self._engine_selection()
@@ -1130,6 +1186,158 @@ class CloneVoiceGroup:
             self._name_entry.insert(0, os.path.splitext(os.path.basename(self._clips[0]["path"]))[0][:40])
         self._update_create()
 
+    # ── Recordings clip player ─────────────────────────────────────
+    def _refresh_player(self):
+        """Show the player when there are clips; keep its menu in step with the clip list."""
+        labels = {}
+        for i, c in enumerate(self._clips, 1):
+            name = os.path.basename(c["path"])
+            labels[f"{i}. {name if len(name) <= 34 else name[:31] + '…'}"] = c["path"]
+        self._pl_labels = labels
+        if not labels:
+            self._clip_stop()
+            self._pl_path, self._pl_seg = None, None
+            self._player.grid_remove()
+            return
+        self._pl_menu.configure(values=list(labels))
+        if self._pl_path not in labels.values():
+            self._select_clip(next(iter(labels)))
+        else:
+            self._pl_var.set(next(k for k, v in labels.items() if v == self._pl_path))
+        self._player.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+
+    def _select_clip(self, label):
+        self._clip_stop()
+        self._pl_var.set(label)
+        self._pl_path = self._pl_labels.get(label)
+        self._pl_seg, self._pl_from = None, 0.0
+        self._pl_seek.configure(to=max(0.1, self._clip_duration()))
+        self._pl_seek_var.set(0.0)
+        self._clip_show_pos(0.0)
+
+    def _on_clip_pick(self, label):
+        if self._pl_labels.get(label) != self._pl_path:
+            self._select_clip(label)
+
+    def _clip_duration(self):
+        if self._pl_seg is not None:
+            return len(self._pl_seg) / 1000.0
+        return next((c["seconds"] for c in self._clips if c["path"] == self._pl_path), 0.0)
+
+    def _clip_position(self):
+        if self._pl_t0 is None:
+            return self._pl_from
+        return min(self._clip_duration(), self._pl_from + time.monotonic() - self._pl_t0)
+
+    def _clip_show_pos(self, pos):
+        self._pl_time.configure(text=f"{self._clock(pos)} / {self._clock(self._clip_duration())}")
+
+    def _on_clip_play(self):
+        """▶ plays from the bar's position (from the start once it reached the end); ⏸ pauses."""
+        if self._pl_loading or not self._pl_path:
+            return
+        if self._pl_t0 is not None:
+            self._clip_pause()
+            return
+        if self._pl_seg is not None:
+            start = self._pl_from if self._pl_from < self._clip_duration() - 0.05 else 0.0
+            self._clip_play_at(start)
+            return
+        try:
+            import pygame
+            fmt = pygame.mixer.get_init()
+        except Exception:
+            fmt = None
+        if not fmt:
+            return
+        # decode off the Tk thread: a long MP3 or MP4 takes a moment
+        path, (freq, _size, ch) = self._pl_path, fmt
+        self._pl_loading = True
+        self._pl_btn.configure(text="…", state="disabled")
+
+        def load():
+            try:
+                from core.audio_io import load_segment
+                seg = load_segment(path).set_frame_rate(freq).set_channels(ch).set_sample_width(2)
+                self._ui(self._clip_loaded, path, seg, None)
+            except Exception as e:   # noqa: BLE001
+                self._ui(self._clip_loaded, path, None, e)
+        threading.Thread(target=load, daemon=True, name="clip-player-load").start()
+
+    def _clip_loaded(self, path, seg, error):
+        self._pl_loading = False
+        self._pl_btn.configure(text="▶", state="normal")
+        if path != self._pl_path:
+            return                          # another clip was picked meanwhile
+        if error is not None:
+            self.app._set_status(f"⚠  Could not play {os.path.basename(path)}: {error}", COLORS["warning"])
+            return
+        self._pl_seg = seg
+        self._pl_seek.configure(to=max(0.1, self._clip_duration()))
+        self._clip_play_at(min(self._pl_from, max(0.0, self._clip_duration() - 0.05)))
+
+    def _clip_play_at(self, pos):
+        try:
+            import pygame
+            part = self._pl_seg[int(pos * 1000):]
+            self._clip_stop()
+            self._pl_sound = pygame.mixer.Sound(buffer=part.raw_data)
+            pygame.mixer.Channel(CLIP_PLAY_CHANNEL).play(self._pl_sound)
+        except Exception as e:   # noqa: BLE001
+            print(f"Clip playback failed: {e}")
+            return
+        self._pl_from, self._pl_t0 = pos, time.monotonic()
+        self._pl_btn.configure(text="❚❚", font=FONTS["body_small"])   # smaller, so the button keeps its width
+        self._clip_tick()
+
+    def _clip_pause(self):
+        if self._pl_t0 is not None:
+            self._pl_from = self._clip_position()
+            self._clip_stop()
+
+    def _clip_stop(self):
+        self._pl_t0 = None
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                pygame.mixer.Channel(CLIP_PLAY_CHANNEL).stop()
+        except Exception:
+            pass
+        self._pl_sound = None
+        try:
+            self._pl_btn.configure(text="▶", font=FONTS["button"])
+        except Exception:
+            pass
+
+    def _clip_tick(self):
+        if self._pl_t0 is None:
+            return
+        pos = self._clip_position()
+        if pos >= self._clip_duration() - 0.01:
+            self._clip_stop()
+            self._pl_from = 0.0             # next ▶ starts over
+            pos = self._clip_duration()
+        if not self._pl_seeking:            # while the bar is dragged, it shows the drag
+            self._pl_seek_var.set(pos)
+            self._clip_show_pos(pos)
+        if self._pl_t0 is not None:
+            self.app.after(100, self._clip_tick)
+
+    def _on_clip_slide(self, value):
+        self._pl_seeking = True
+        if self._pl_t0 is None:
+            self._pl_from = float(value)
+        self._clip_show_pos(float(value))
+
+    def _clip_seek(self, pos):
+        """Bar released: jump there, and keep playing if it was playing."""
+        self._pl_seeking = False
+        pos = min(max(0.0, float(pos)), self._clip_duration())
+        self._pl_from = pos
+        self._clip_show_pos(pos)
+        if self._pl_t0 is not None:
+            self._clip_play_at(pos)
+
     def _on_record(self):
         """Record a clip with the microphone; the take is added like an imported file."""
         from ui.panels.record_dialog import RecordDialog
@@ -1157,8 +1365,33 @@ class CloneVoiceGroup:
             return
         self._analyzer = AnalyzerDialog(self.app, self._selections(), clean=bool(self.clean_on.get()),
                                         denoise=bool(self.denoise_var.get()),
-                                        on_applied=lambda sel: self._update_create(),
+                                        on_applied=self._on_match_applied,
                                         gender=self._match_gender_var.get().lower())
+
+    def _on_match_applied(self, selection, result=None):
+        """Voice match applied a base voice. Keep its ▶ Result for the voice created next.
+
+        result: {"wav", "synth_key", "selections", "clean", "denoise"} or None. The
+        WAV is copied, because the analyzer's temp folder goes when it closes.
+        """
+        self._match_result = None
+        if result and os.path.isfile(result["wav"]):
+            wav = os.path.join(self._new_tmp(), "match_result.wav")
+            shutil.copyfile(result["wav"], wav)
+            self._match_result = dict(result, wav=wav)
+        self._update_create()
+
+    def _usable_match(self, eng_settings, clips, prep):
+        """The voice match Result when it was made from these clips with this base voice, else None."""
+        from ui.panels.engine_panel import EnginePanel
+        m = getattr(self, "_match_result", None)
+        if not m or not eng_settings or not os.path.isfile(m["wav"]):
+            return None
+        same_clean = bool(m["clean"]) == bool(prep.get("separate")) and (
+            not m["clean"] or bool(m["denoise"]) == bool(prep.get("denoise")))
+        if m["selections"] != clips or not same_clean:
+            return None
+        return m if m["synth_key"] == EnginePanel.synthesis_key(eng_settings) else None
 
     def _on_clear_clips(self):
         self._clips = []
@@ -1228,7 +1461,8 @@ class CloneVoiceGroup:
         def runner():
             try:
                 msg = work()
-                self._ui(self._end, msg or "Done", COLORS["success"])
+                msg, color = msg if isinstance(msg, tuple) else (msg, COLORS["success"])
+                self._ui(self._end, msg or "Done", color)
             except VCCancelled:
                 self._ui(self._end, f"{name} cancelled", COLORS["warning"])
             except VCError as e:
@@ -1246,21 +1480,26 @@ class CloneVoiceGroup:
         if self._cancel.is_set():
             raise VCCancelled()
 
-    def _synthesize(self, text, eng_settings, tmp):
-        """Synthesize *text* with the selected engine; returns (float32 samples, sr)."""
+    def _synthesize(self, text, eng_settings, tmp, cancel=None):
+        """Synthesize *text* with the selected engine; returns (float32 samples, sr).
+
+        cancel: the Event that aborts it (default: this group's Cancel button).
+        """
         import numpy as np
         import torch
         from core.audio_io import load_segment
         app = self.app
+        cancel = cancel or self._cancel
         engine = app._engine_map.get(eng_settings["engine_name"])
         if engine is None:
             raise VCError("The selected TTS engine is not available.")
         use_gpu = eng_settings["use_gpu"] and torch.cuda.is_available()
         kwargs = app._engine_kwargs(eng_settings, "cuda" if use_gpu else "cpu",
-                                    lambda m: None, self._cancel.is_set)
+                                    lambda m: None, cancel.is_set)
         with app._engine_lock:
             res = engine.synthesize(text, tmp, **kwargs)
-        self._check_cancel()
+        if cancel.is_set():
+            raise VCCancelled()
         seg = load_segment(res["playback_file"]).set_channels(1)
         peak = float(2 ** (8 * seg.sample_width - 1))
         return np.array(seg.get_array_of_samples(), dtype=np.float32) / peak, seg.frame_rate
@@ -1320,9 +1559,10 @@ class CloneVoiceGroup:
         prep = self._prep_options()
         eng, voice, eng_settings = self._base_voice()
         base_sel = self._engine_selection()      # restored when the voice is switched on
+        match = self._usable_match(eng_settings, clips, prep)
         if mode == "Quick":
             self._run("Create voice", "Preparing the reference voice…",
-                      lambda: self._do_quick(name, clips, eng, voice, base_sel, prep))
+                      lambda: self._do_quick(name, clips, eng, voice, base_sel, prep, eng_settings, match))
         else:
             if self.app._is_generating:
                 messagebox.showinfo("Busy", "Wait for the current generation to finish, then start training.",
@@ -1331,7 +1571,8 @@ class CloneVoiceGroup:
             opts = dict(epochs=int(round(self.epochs_var.get())), batch_size=int(self.batch_var.get()),
                         sample_rate=SR_CHOICES[self.sr_var.get()], match=bool(self.match_var.get()))
             self._run("Training", "Starting…",
-                      lambda: self._do_train(name, clips, eng, voice, eng_settings, opts, base_sel, prep))
+                      lambda: self._do_train(name, clips, eng, voice, eng_settings, opts, base_sel, prep,
+                                             match))
 
     def _finish_new_voice(self, p, msg):
         def ui():
@@ -1370,7 +1611,45 @@ class CloneVoiceGroup:
                                      progress_cb=progress, check_cancel=self._check_cancel,
                                      skip_silences=prep.get("skip_silences", False))
 
-    def _do_quick(self, name, clips, eng, voice, base_sel=None, prep=None):
+    def _save_first_preview(self, p, eng_settings, match=None):
+        """Save the new voice's ▶ Preview.
+
+        match (from _usable_match): the voice match ▶ Result made from the same
+        clips and base voice. Its first 10 s are transcribed once, and those
+        words become the voice's preview_text, so later remakes say the same
+        thing. A Quick voice keeps that audio as its preview: the analyzer
+        cloned it the same way (Seed-VC, the clip as reference), so nothing is
+        spoken again. A trained (RVC) voice speaks the words with its model.
+        Without a match the preview says previews.TEXT.
+
+        The voice is ready by now, so neither a failure nor Cancel undoes it;
+        ▶ Preview makes the preview later instead.
+        """
+        if not eng_settings:
+            return
+        try:
+            from ui.panels.engine_panel import EnginePanel
+            cut = None
+            if match:
+                self._ui(self._set_progress, 0.95, "Taking the preview from the voice match result…")
+                cut = previews.cut_preview(match["wav"], os.path.join(self._new_tmp(), "preview.wav"))
+                words = previews.transcribe(cut)
+                if words:
+                    p = library.update_params(p.slug, preview_text=words)
+                else:
+                    cut = None                  # nothing heard: fall back to the fixed sentence
+            self._check_cancel()
+            sound = previews.sound_of(p)
+            if cut is None or p.mode != "seedvc":
+                self._ui(self._set_progress, 0.95, "Saving a preview of the voice…")
+                cut = self.make_preview(p, eng_settings, sound)
+            previews.store(p.slug, cut, previews.fingerprint(p, EnginePanel.synthesis_key(eng_settings), sound))
+        except VCCancelled:
+            print(f"Preview of '{p.name}' skipped: cancelled")
+        except Exception as e:   # noqa: BLE001
+            print(f"Preview of '{p.name}' not saved: {e}")
+
+    def _do_quick(self, name, clips, eng, voice, base_sel=None, prep=None, eng_settings=None, match=None):
         p = library.create_voice(name, "seedvc", clips, eng, voice, base_selection=base_sel, prep=prep)
         try:
             p = self._prepare(p, prep, 0.0, 0.8)
@@ -1378,6 +1657,7 @@ class CloneVoiceGroup:
             library.build_seedvc_reference(p)
             self._check_cancel()
             p = library.update_params(p.slug, status="ready")
+            self._save_first_preview(p, eng_settings, match)
         except BaseException:
             library.delete_voice(p.slug)
             raise
@@ -1390,7 +1670,7 @@ class CloneVoiceGroup:
         p = library.import_rvc_model(name, pth, index, info)
         return self._finish_new_voice(p, f"Voice '{name}' imported ({info['sample_rate'] // 1000} kHz model).")
 
-    def _do_train(self, name, clips, eng, voice, eng_settings, opts, base_sel=None, prep=None):
+    def _do_train(self, name, clips, eng, voice, eng_settings, opts, base_sel=None, prep=None, match=None):
         from core.voice_cloning import get_client
         p = library.create_voice(name, "rvc", clips, eng, voice, base_selection=base_sel, prep=prep)
         t0 = time.monotonic()
@@ -1436,6 +1716,7 @@ class CloneVoiceGroup:
                                       index=f"model/{p.slug}.index" if res.get("index") else None,
                                       sample_rate=res["sample_rate"], epochs=res["epochs"])
             shutil.rmtree(p.dir / "dataset", ignore_errors=True)
+            self._save_first_preview(p, eng_settings, match)
         except VCWorkerError as e:
             library.delete_voice(p.slug)
             if e.kind == "oom" and opts["batch_size"] > 1:
@@ -1469,31 +1750,98 @@ class CloneVoiceGroup:
                     f"(base {r['base_f0'] or 0:.0f} Hz → target {r['target_f0'] or 0:.0f} Hz)")
         self._run("Match pitch", "Synthesizing a sample with the current engine voice…", work)
 
+    def make_preview(self, p, eng_settings, sound, cancel=None, say=None):
+        """Speak *p*'s preview text with *eng_settings*, convert it into voice *p*; returns a WAV path.
+
+        Runs on a worker thread. sound: previews.sound_of() values to convert with.
+        """
+        import soundfile as sf
+        from effects.cloned_voices import convert_samples
+        cancel = cancel or self._cancel
+        say = say or (lambda m: None)
+        tmp = self._new_tmp()
+        say("Synthesizing the preview sentence…")
+        y, sr = self._synthesize(previews.text_of(p), eng_settings, tmp, cancel=cancel)
+        say("Converting to the cloned voice…")
+        params = {"pitch": p.pitch, "index_rate": p.index_rate, "protect": p.protect,
+                  "diffusion_steps": p.diffusion_steps}
+        params.update(sound)
+        out = convert_samples(p.slug, y, sr, cancel_event=cancel, status_cb=say, **params)
+        path = os.path.join(tmp, "preview.wav")
+        sf.write(path, out, sr)
+        return path
+
+    def saved_fingerprint(self, p):
+        """Fingerprint of *p*'s preview with its saved base and sound, or None without a usable base."""
+        from ui.panels.engine_panel import EnginePanel
+        eng, err = self.app._engine_panel.settings_for_selection(self._selection_for(p))
+        if err:
+            return None
+        return previews.fingerprint(p, EnginePanel.synthesis_key(eng), previews.sound_of(p))
+
     def _on_preview(self):
+        """▶ Preview plays the voice's preview (saved, or made now); ■ Stop stops it."""
+        from ui.panels.engine_panel import EnginePanel
+        if self._active_sound is not None:
+            self._stop_active_preview()
+            return
         p = self._active_profile
         if p is None:
             return
         self._flush_params()
-        settings = self.get_settings()
+        p = self._active_profile
         _, _, eng_settings = self._base_voice()
+        sound = previews.sound_of(p)
+        fp = previews.fingerprint(p, EnginePanel.synthesis_key(eng_settings), sound)
+        saved = previews.cached(p.slug, fp)
+        if saved:                               # made before with exactly these settings
+            if self._play_active_preview(saved):
+                self.app._set_status(f"▶  Playing the saved preview of '{p.name}'", COLORS["success"])
+            return
+        keep = fp == self.saved_fingerprint(p)  # the voice's own settings: worth saving
 
         def work():
-            import soundfile as sf
-            from effects.cloned_voices import convert_samples
-            tmp = self._new_tmp()
-            self._ui(self._set_progress, 0.1, "Synthesizing the preview sentence…")
-            y, sr = self._synthesize(PREVIEW_TEXT, eng_settings, tmp)
-            self._ui(self._set_progress, 0.35, "Converting to the cloned voice…")
-            out = convert_samples(p.slug, y, sr, pitch=settings["pitch"],
-                                  index_rate=settings["index_rate"], protect=settings["protect"],
-                                  diffusion_steps=settings["diffusion_steps"],
-                                  cancel_event=self._cancel,
-                                  status_cb=lambda m: self._ui(self._set_progress, 0.5, m))
-            path = os.path.join(tmp, "preview.wav")
-            sf.write(path, out, sr)
-            self._ui(self._play, path)
-            return f"▶  Playing preview of '{p.name}'"
+            path = self.make_preview(p, eng_settings, sound,
+                                     say=lambda m: self._ui(self._set_progress, 0.4, m))
+            if keep:
+                previews.store(p.slug, path, fp)
+            self._ui(self._play_active_preview, path)
+            return f"▶  Playing preview of '{p.name}'" + (" (saved for next time)" if keep else "")
         self._run("Preview", "Starting…", work)
+
+    def refresh_preview(self, slug):
+        """Make the saved preview of *slug* again, in the background, when it is out of date.
+
+        Skipped while another Clone Voice task runs; ▶ Preview then makes it
+        the next time it is pressed.
+        """
+        from ui.panels.engine_panel import EnginePanel
+        try:
+            p = library.load_voice(slug)
+        except (OSError, ValueError):
+            return
+        if not p.is_ready or self._busy:
+            return
+        eng, err = self.app._engine_panel.settings_for_selection(self._selection_for(p))
+        if err:
+            return
+        sound = previews.sound_of(p)
+        fp = previews.fingerprint(p, EnginePanel.synthesis_key(eng), sound)
+        if previews.cached(slug, fp):
+            return
+
+        def work():
+            try:
+                path = self.make_preview(p, eng, sound,
+                                         say=lambda m: self._ui(self._set_progress, 0.4, m))
+            except VCCancelled:
+                raise
+            except Exception as e:   # noqa: BLE001
+                msg = e.message if isinstance(e, VCError) else f"{type(e).__name__}: {e}"
+                return f"⚠  Preview of '{p.name}' not updated: {msg}", COLORS["warning"]
+            previews.store(slug, path, fp)
+            return f"✅  Saved a new preview of '{p.name}'"
+        self._run("Preview update", f"Updating the saved preview of '{p.name}'…", work)
 
     def _on_preview_cleanup(self):
         sels = self._selections()
@@ -1572,6 +1920,48 @@ class CloneVoiceGroup:
             except Exception:
                 pass
 
+    def _play_active_preview(self, path):
+        """Play the Active voice preview; its button turns into ■ Stop until it ends."""
+        self._stop_preview()                    # a cleanup ▶ Original / ▶ Cleaned on the same channel
+        if not self._play(path):
+            return False
+        self._active_sound = self._preview_sound
+        self._preview_btn.configure(text="■  Stop")
+        self.app.after(200, self._watch_active_preview)
+        return True
+
+    def _watch_active_preview(self):
+        """Back to ▶ Preview when the audio ends, or when something else took the channel."""
+        if self._active_sound is None:
+            return
+        try:
+            import pygame
+            ch = pygame.mixer.Channel(2)
+            mine = bool(pygame.mixer.get_init()) and ch.get_busy() and ch.get_sound() is self._active_sound
+        except Exception:
+            mine = False
+        if mine:
+            self.app.after(200, self._watch_active_preview)
+        else:
+            self._active_sound = None
+            self._preview_btn.configure(text="▶  Preview")
+
+    def _stop_active_preview(self):
+        if self._active_sound is None:
+            return
+        try:
+            import pygame
+            ch = pygame.mixer.Channel(2)
+            if pygame.mixer.get_init() and ch.get_sound() is self._active_sound:
+                ch.stop()
+        except Exception:
+            pass
+        self._active_sound = None
+        try:
+            self._preview_btn.configure(text="▶  Preview")
+        except Exception:
+            pass
+
     def _play(self, path):
         try:
             import pygame
@@ -1586,6 +1976,7 @@ class CloneVoiceGroup:
 
     def cleanup(self):
         self._cancel.set()
+        self._clip_stop()
         try:
             import pygame
             if pygame.mixer.get_init():

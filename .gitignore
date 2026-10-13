@@ -72,6 +72,8 @@ tools/process_*.py
 
 # Voice cloning runtime (venvs, Applio, seed-vc, voices) - see AGENTS.md
 vc_runtime_data/
+# Saved ▶ Preview audio of each cloned voice (core/voice_cloning/previews.py)
+vc_runtime_data/previews/
 # RVC search indexes that come with downloaded voice models (*.pth is above)
 *.index
 # Partial downloads and interrupted atomic writes (profile.json.tmp, runtime.json.tmp)

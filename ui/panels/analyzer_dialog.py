@@ -12,14 +12,20 @@ Opened by 🔍 Analyze in Customization → Clone Voice → Create voice. One ru
      the clip's own (voicematch.decide_gender). Only voices of that gender
      are compared.
   4. Shortlists the 3 English engine voices closest to the clip.
-  5. Test-clones a sentence from each with Seed-VC (the clip is the reference)
-     and ranks them by how close each cloned result sounds to the clip, minus
-     the same pitch penalty as the shortlist: 1. Best match, 2. and 3. Close match.
+  5. Makes each one's ▶ Result: the clip's Whisper transcript spoken by that
+     engine voice at the suggested speed, cloned with Seed-VC (the clip is the
+     reference). The Results are ranked by how close they sound to the clip,
+     minus the same pitch penalty as the shortlist: 1. Best match, 2. and 3.
+     Close match. The bank recordings are only used to shortlist; nothing else
+     is spoken or cloned.
 
-Each row: ▶ Sample (the engine voice), ▶ Original (the user's clip as it was
-measured: trimmed, and cleaned when music removal is on) and ▶ Result (its
-cloned test), all play/stop toggles, and Apply, which selects engine, voice and a speed that
-matches the clip's pace (EnginePanel.apply_voice_selection) and closes the
+Each row has two play/stop toggles:
+  ▶ Original  the user's clip as it was measured: trimmed, and cleaned when
+              music removal is on (at most MAX_ANALYSIS_SECONDS)
+  ▶ Result    the clip's words in that voice, cloned, to compare word for word
+and Apply, which selects engine, voice and a speed that matches the clip's pace
+(EnginePanel.apply_voice_selection), hands the Result to on_applied (a Quick
+voice created next keeps its first 10 s as the saved preview) and closes the
 window. The user can still change the controls afterwards.
 """
 
@@ -35,7 +41,10 @@ from ui.theme import use_app_icon
 from core.voice_cloning import voicematch
 from core.voice_cloning.errors import VCCancelled, VCError
 
-MAX_ANALYSIS_SECONDS = 60
+# The selection (Clean-up → Use part of each recording) is measured and spoken
+# up to this length: Quick voices read at most 25 s, and each Result is spoken
+# and cloned once per shortlisted voice.
+MAX_ANALYSIS_SECONDS = 25
 PLAY_CHANNEL = 5
 
 
@@ -62,6 +71,9 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self._clip = None
         self._clip_wav = None         # the prepared clip (trim, music removal), played by ▶ Original
         self._ranked = []
+        self._cands = {}              # candidate id -> voicematch.candidates() entry
+        self._ref = None              # Seed-VC reference made from the clip
+        self._clip_text = ""          # the clip's Whisper transcript, spoken by ▶ Result
         self._sound = None
         self._playing = None          # (key, button, idle_text) of the clip being played
         try:
@@ -73,8 +85,9 @@ class AnalyzerDialog(ctk.CTkToplevel):
         head.pack(fill="x", padx=16, pady=(14, 2))
         ctk.CTkLabel(head, text="🔍  Voice match", font=FONTS["subtitle"],
                      text_color=COLORS["text_primary"]).pack(side="left")
-        ctk.CTkLabel(self, text="Test-clones your clip from the closest English engine voices and ranks them. "
-                                "Apply sets the engine, voice and speed; you can still change them.",
+        ctk.CTkLabel(self, text="Speaks your clip's words with the closest English engine voices, clones them "
+                                "and ranks the results. Apply sets the engine, voice and speed; you can still "
+                                "change them.",
                      font=FONTS["body_small"], text_color=COLORS["text_muted"], wraplength=720,
                      justify="left").pack(anchor="w", padx=16)
 
@@ -157,7 +170,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
 
     # ── the run ────────────────────────────────────────────────────
     def _prepare_clip(self):
-        """One WAV of the selected audio (≤60 s), cleaned when music removal is on."""
+        """One WAV of the selected audio (≤MAX_ANALYSIS_SECONDS), cleaned when music removal is on."""
         from core.audio_io import load_segment
         from pydub import AudioSegment
         out = AudioSegment.silent(duration=0, frame_rate=44100)
@@ -185,11 +198,10 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self._cancel_btn.grid()
 
         def work():
-            import numpy as np
-            from core.audio_io import load_segment
-            from core.voice_cloning import get_client, library
+            from core.voice_cloning import get_client
             client = get_client()
             cands = voicematch.candidates(list(self.app._engine_map), getattr(self.app, "_system_voices", []))
+            self._cands = {c["id"]: c for c in cands}
             bank = voicematch.load_bank()
             if voicematch.needs_work(bank, cands):
                 todo = len(voicematch.missing(bank, cands))
@@ -206,6 +218,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
             clip = voicematch.analyze_clip(
                 clip_wav, embed_fn=lambda p: (client.embed([p], cancel_event=self._cancel) or [None])[0],
                 progress=lambda f, m: self._ui(self._progress, 0.48 + 0.12 * f, m))
+            self._clip_text = (clip.get("text") or "").strip()
             if self.gender_mode == "auto":
                 gender, why = voicematch.decide_gender(bank, cands, clip)
                 self._gender_note = f"Auto: {why}"
@@ -218,33 +231,10 @@ class AnalyzerDialog(ctk.CTkToplevel):
             if not shortlist:
                 return clip, [], None
 
-            # test-clone each shortlisted voice; rank by how close the result sounds to the clip
-            note = None
-            try:
-                ref = os.path.join(self._tmp, "reference.wav")
-                library._drop_silences(load_segment(clip_wav))[:25000].export(ref, format="wav")
-                outs = []
-                for i, m in enumerate(shortlist):
-                    self._check()
-                    self._ui(self._progress, 0.62 + 0.3 * i / len(shortlist),
-                             f"Test-cloning {i + 1} of {len(shortlist)}: {m['label']}…")
-                    out = os.path.join(self._tmp, f"result_{i}.wav")
-                    client.convert_reference(os.path.join(voicematch.bank_dir(), "samples", m["wav"]),
-                                             ref, out, diffusion_steps=10, cancel_event=self._cancel)
-                    outs.append(out)
-                self._ui(self._progress, 0.94, "Comparing the results with your clip…")
-                c = np.asarray(clip["emb"], dtype=np.float32)
-                for m, out, e in zip(shortlist, outs, client.embed(outs, cancel_event=self._cancel)):
-                    m["result"] = out
-                    # the result takes the clip's timbre whatever the source, so keep the pitch penalty
-                    sim = float(np.dot(c, np.asarray(e, dtype=np.float32))) if e else -1.0
-                    m["final"] = sim - voicematch.PITCH_PENALTY * (m.get("st") or 0)
-                shortlist.sort(key=lambda m: m["final"], reverse=True)
-            except VCCancelled:
-                raise
-            except VCError as e:
-                note = f"Could not test-clone ({e.message}). Ranked by voice similarity instead."
-            return clip, shortlist, note
+            if not self._clip_text:
+                return clip, shortlist, ("No words were heard in your clip, so there is no ▶ Result. "
+                                         "Ranked by voice similarity.")
+            return clip, *self._make_results(shortlist, clip_wav, clip)
 
         def runner():
             try:
@@ -279,6 +269,60 @@ class AnalyzerDialog(ctk.CTkToplevel):
             text += (f"\n⚠  The clip sounds like {lang}. Voice match compares English voices only, "
                      "so treat the matches as rough.")
         self._clip_lbl.configure(text=text)
+
+    def _make_results(self, shortlist, clip_wav, clip):
+        """Speak the clip's words with each shortlisted voice, clone them, rank by the results.
+
+        Runs on the worker thread. Returns (ranked, note). A voice whose Result
+        fails keeps its shortlist place after the voices that have one.
+        """
+        import numpy as np
+        from core.audio_io import load_segment
+        from core.voice_cloning import get_client, library
+        from ui.panels.engine_panel import EnginePanel
+        client = get_client()
+        ref = os.path.join(self._tmp, "reference.wav")
+        library._drop_silences(load_segment(clip_wav))[:25000].export(ref, format="wav")
+        self._ref = ref
+        text, n, failed = self._clip_text, len(shortlist), []
+        for i, m in enumerate(shortlist):
+            self._check()
+            cand = self._cands[m["id"]]
+            try:
+                self._ui(self._progress, 0.62 + 0.3 * i / n,
+                         f"▶ Result {i + 1} of {n}: your clip's words in {m['label']}…")
+                src = os.path.join(self._tmp, f"transcript_{i}.wav")
+                voicematch.speak(self.app, self._eng_settings, cand, text, src, speed=m.get("speed"),
+                                 check_cancel=self._check)
+                self._check()
+                self._ui(self._progress, 0.62 + 0.3 * (i + 0.4) / n,
+                         f"▶ Result {i + 1} of {n}: cloning {m['label']}…")
+                out = os.path.join(self._tmp, f"result_{i}.wav")
+                client.convert_reference(src, ref, out, diffusion_steps=10, cancel_event=self._cancel)
+                m["result"] = out
+                # what the Result was spoken with, so a voice created with the same
+                # base can reuse it as its preview
+                m["synth_key"] = EnginePanel.synthesis_key(
+                    voicematch.speak_settings(self._eng_settings, cand, m.get("speed")))
+            except VCCancelled:
+                raise
+            except Exception as e:   # noqa: BLE001
+                if self._cancel.is_set():
+                    raise VCCancelled()
+                failed.append(m["label"])
+                print(f"Voice match Result failed for {m['label']}: {e}")
+        made = [m for m in shortlist if m.get("result")]
+        if not made:
+            return shortlist, "The Results could not be made. Ranked by voice similarity instead."
+        self._ui(self._progress, 0.94, "Comparing the results with your clip…")
+        c = np.asarray(clip["emb"], dtype=np.float32)
+        for m, e in zip(made, client.embed([m["result"] for m in made], cancel_event=self._cancel)):
+            # the result takes the clip's timbre whatever the source, so keep the pitch penalty
+            sim = float(np.dot(c, np.asarray(e, dtype=np.float32))) if e else -1.0
+            m["final"] = sim - voicematch.PITCH_PENALTY * (m.get("st") or 0)
+        made.sort(key=lambda m: m["final"], reverse=True)
+        note = (f"No ▶ Result for {', '.join(failed)}; it is listed after the others." if failed else None)
+        return made + [m for m in shortlist if not m.get("result")], note
 
     def _show(self, ranked, note):
         self._ranked = ranked
@@ -321,8 +365,6 @@ class AnalyzerDialog(ctk.CTkToplevel):
                              text_color=COLORS["text_secondary"], anchor="w").pack(anchor="w")
             btns = ctk.CTkFrame(card, fg_color="transparent")
             btns.pack(side="right", padx=10)
-            sample = os.path.join(voicematch.bank_dir(), "samples", m["wav"])
-            self._play_button(btns, f"sample:{m['id']}", "▶ Sample", sample, COLORS["text_muted"])
             if self._clip_wav:
                 self._play_button(btns, f"original:{m['id']}", "▶ Original", self._clip_wav,
                                   COLORS["accent_secondary"])
@@ -349,7 +391,12 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self.app._set_status(f"🔍  TTS Engine set to {desc} by voice match. Create the voice to keep it "
                              "as its base.", COLORS["success"])
         if self.on_applied:
-            self.on_applied(m["selection"])
+            result = None
+            if m.get("result") and os.path.isfile(m["result"]):
+                # on_applied copies the file before destroy() removes this window's temp folder
+                result = {"wav": m["result"], "synth_key": m["synth_key"], "selections": self.selections,
+                          "clean": self.clean, "denoise": self.denoise}
+            self.on_applied(m["selection"], result)
         self.destroy()
 
     # ── play / stop toggles ────────────────────────────────────────

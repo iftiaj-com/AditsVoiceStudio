@@ -7,6 +7,20 @@ import customtkinter as ctk
 from core.constants import COLORS, FONTS
 from ui.theme import card
 
+# Shown in the text box at startup, so a first Generate has something to speak.
+SAMPLE_TEXT = (
+    "I feel that it has become such a big challenge in today's world because there's so much "
+    "data available, social media available, and you get instant feedback, right? So I think in "
+    "the past, a band would lock themselves in a shed or whatever it may be and then work on stuff "
+    "and maybe their friends would listen or they would listen, but it would take months before "
+    "the audience heard it. Today, you could literally record something in three seconds, put it "
+    "up and get instant feedback. And so the feedback loop has got shorter. The time to create "
+    "something has got shorter. It's easier to publish and it's easier to get criticism or "
+    "feedback. And so do you say that creativity being stifled and, and is hampering creativity? "
+    "Absolutely. And the beauty of it is because so much of what's being made is being made that "
+    "way, that if we choose to make something not like that, it really stands out."
+)
+
 
 class TextPanel:
     def __init__(self, parent, row=None):
@@ -40,11 +54,7 @@ class TextPanel:
             corner_radius=10, wrap="word",
         )
         self.text_input.pack(fill=pack_fill, expand=pack_expand, padx=16, pady=(0, 4))
-        self.text_input.insert(
-            "1.0",
-            "Hello, world! Welcome to Adits Voice Studio — your personal text-to-speech studio. "
-            "Try different engines, voices, and effects to create unique speech outputs!"
-        )
+        self.text_input.insert("1.0", SAMPLE_TEXT)
 
         self._char_label = ctk.CTkLabel(
             frame, text="0 characters",

@@ -56,6 +56,7 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `    ├── client.py` | Worker Client | `VCClient`: one worker per (engine, role), JSON-lines requests, cancel, GPU policy. |
 | `    ├── library.py` | Voice Library | `VoiceProfile` and the `voices/<slug>/` folders: create, import, rename, delete. |
 | `    ├── pitch.py` | Pitch Matching | Median F0 of the base and target voices, semitone offset. |
+| `    ├── previews.py` | Saved Previews | The saved ▶ Preview WAV of each voice in `<root>\previews\`, with a fingerprint of the settings that made it. |
 | `    ├── voicematch.py` | Voice Match | Self-maintaining voice bank of English engine voices (engine fingerprints, retries), clip analysis, shortlist. |
 | `    ├── estimate.py` | Time Estimates | Training and conversion time estimates shown in the UI. |
 | `    └── errors.py` | Exceptions | `VCNotInstalled`, `VCBusy`, `VCCancelled`, `VCWorkerError`, `InstallError`. |
@@ -81,8 +82,8 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry, in three sub-sections: Favourites, Cloned Voices (with the ✏️ button) and Effects. The ♡ on each card adds a mirror card to Favourites that shares the original's switch variable, so both always show the same state. Favourite keys are saved in `%LOCALAPPDATA%\AditsVoiceStudio\settings\favourites.json`; a deleted cloned voice is dropped from it. |
 | `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
 | `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
-| `    ├── clone_voice_dialog.py` | GUI Widget | Rename / delete window opened by the ✏️ button in the Cloned Voices header. |
-| `    ├── analyzer_dialog.py` | GUI Widget | Voice match: one run (bank update, clip analysis, test-clone), ranked Best / Close matches with ▶ Sample / ▶ Result toggles and Apply. |
+| `    ├── clone_voice_dialog.py` | GUI Widget | Window opened by the ✏️ button in the Cloned Voices header: rename, change the base voice, speed and sound settings (with ▶ Preview and 🎯 Match), delete. |
+| `    ├── analyzer_dialog.py` | GUI Widget | Voice match: one run (bank update, clip analysis, ▶ Result for each shortlisted voice), ranked Best / Close matches with ▶ Original / ▶ Result toggles and Apply, which hands the Result to the next Quick voice as its preview. |
 | `    ├── record_dialog.py` | GUI Widget | Microphone recorder for clone clips: device picker, level meter, live waveform, preview with seek, Add to clips. |
 | `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
@@ -334,7 +335,10 @@ There are three ways to make a voice:
 * **Customization → Clone Voice → Active voice:** pick a voice (this switches its
   tile on), then tune it. RVC voices have Pitch (with 🎯 Match), Index rate and
   Protect. Quick voices have Quality steps. The estimate line shows how long the
-  current text will take. ▶ Preview converts a short sentence.
+  current text will take. ▶ Preview plays the voice's saved preview (or makes
+  it); while it plays the same button reads ■ Stop and stops it. It also resets
+  when the audio ends, another voice is switched on, or another sound takes
+  pygame channel 2.
 * **Customization → Clone Voice → Create voice:** name, mode, clips (or a model
   file), and for training Epochs, Batch and Sample rate. The estimated time
   updates as the options change. One progress row with ✖ Cancel serves install,
@@ -347,8 +351,45 @@ There are three ways to make a voice:
   by side. ▶ Preview moves under the base voice for RVC voices so both tiles end
   level. Explanations are hover tips (`_Tip`), not notes under the controls.
   Never grid an empty `CTkFrame`: it keeps its default 200 px height.
-* **Voice Effects → Cloned Voices → ✏️:** rename or delete voices. Unfinished and
-  failed voices are listed too, so they can be cleaned up.
+* **Voice Effects → Cloned Voices → ✏️:** rename or delete voices, or change a
+  voice's settings. **🔊 Voice settings ▾** opens an editor in the row: the base
+  (engine, Kokoro language, voice, speed) and the sound sliders of the Clone
+  Voice box (RVC: Pitch with 🎯, Index, Protect; Quick: Quality). **▶ Preview**
+  speaks `PREVIEW_TEXT` with the editor's values, saved or not, and converts it
+  into the clone. **🎯** measures the editor's base voice (not the TTS Engine
+  card) against the clips and sets Pitch; it needs an RVC voice with clips. The
+  row's **Save** writes the name, base and sound together, and
+  `CloneVoiceGroup.reload_active()` shows them in the Clone Voice box when the
+  voice is switched on. Synthesis settings come from
+  `EnginePanel.settings_for_selection()`, so the TTS Engine card does not change
+  until a base is saved for the voice that is switched on. Only one preview or
+  pitch match runs at a time; its button turns into Cancel. Unfinished and
+  failed voices are listed too, so they can be cleaned up; only ready voices
+  preview.
+* **Saved previews** (`core/voice_cloning/previews.py`). Each voice's ▶ Preview
+  is kept as `<root>\previews\<slug>.wav` plus `<slug>.json` holding a
+  fingerprint: the preview text, `EnginePanel.synthesis_key()` of the engine
+  settings that spoke it, the sound settings and the model file's size and
+  time. ▶ Preview (Clone Voice box and ✏️ window) plays the saved file at once
+  when the fingerprint of the request matches, and otherwise makes a new one,
+  which is saved only when it uses the voice's saved base and sound
+  (`CloneVoiceGroup.saved_fingerprint()`). Creating a voice saves its first
+  preview as the last step (Cancel or a failure there keeps the voice). After
+  a voice match with the same clips and base voice, the first 10 s of the
+  applied ▶ Result (`previews.cut_preview()`, cut in the last pause) are
+  transcribed once (`previews.transcribe()`) into `profile.preview_text`; a
+  Quick voice keeps that audio as its preview, since the analyzer cloned it
+  the same way, and a trained voice speaks the words with its model. Without a
+  match, `preview_text` stays empty and previews say `previews.TEXT`. Every
+  remake speaks `previews.text_of(p)`, which is also part of the fingerprint. Saving
+  a new base or sound in the ✏️ window keeps the preview just heard when it
+  matches, or else deletes the old one and runs `refresh_preview()` as a
+  "Preview update" task. Slider moves in the Clone Voice box and **Use current**
+  only make the saved one stale; the next ▶ Preview replaces it.
+  `library.delete_voice()` deletes the preview. From source the folder is
+  `vc_runtime_data\previews\` (gitignored); the installed app keeps it under
+  `%LOCALAPPDATA%`, since the install folder is read-only. Voices without a
+  usable base (imported models before **Use current**) get no saved preview.
 * Settings are saved to the voice's `profile.json` as the sliders move.
 * **🎙 Record** (between Add clips and Clear) opens `RecordDialog`: pick a
   microphone (default host API, default device first), record with a live level
@@ -357,6 +398,13 @@ There are three ways to make a voice:
   **Discard**. Takes are 16-bit mono WAV in `<root>\recordings\` (gitignored with
   the runtime root) and become normal clips, so trim and cleanup apply to them.
   Capture uses PyAudio (`requirements.txt`, and `_REQUIRED` in `build_exe.py`).
+* **Clip player** (Recordings tile, under Auto / Male / Female, shown once a clip
+  is added): ▶ / ❚❚, a menu of the added clips, the time, and a seek bar. It
+  plays the whole file (not only the trimmed part) on pygame channel
+  `CLIP_PLAY_CHANNEL` (6; channels 1 to 5 are ambiance, previews, timeline,
+  recorder and analyzer). The clip is decoded on a thread on its first ▶ and
+  kept until another clip is picked; seeking replays from the new point, as in
+  `RecordDialog`. Switching tabs pauses it; Clear and app close stop it.
 * **Base voice.** A clone sounds best when converted from the engine voice it was
   made with. Creating a voice stores the TTS Engine dropdown values in
   `profile.base_selection` (engine, Kokoro language, voice, and speed: Kokoro /
@@ -439,7 +487,7 @@ from the clip, to use as the base voice.
    Voices no longer offered are pruned. Entries from before fingerprints existed
    adopt the current one instead of being rebuilt. There is no manual rebuild.
 2. **Clip analysis** of the selected audio (after trim, and after music removal
-   when that is on), up to 60 s: pitch with a rough gender guess, speaking
+   when that is on), up to `MAX_ANALYSIS_SECONDS` (25 s): pitch with a rough gender guess, speaking
    speed and language (faster-whisper, `core.subtitles.get_whisper_model`), and
    voiceprint.
 3. **Gender.** The **Auto / Male / Female** row under the Recordings buttons
@@ -460,25 +508,40 @@ from the clip, to use as the base voice.
    70 Hz "likely male", while their voiceprints were clearly female.
 4. **Shortlist:** the 3 voices of that gender with the highest voiceprint
    similarity minus 0.015 per semitone of pitch difference.
-5. **Test-clone and rank:** each shortlisted sample is converted with Seed-VC,
-   using the clip (silences removed, 25 s) as the reference, and the result's
-   voiceprint is compared with the clip, minus the same pitch penalty (the
-   converted result takes the clip's timbre whatever the source, so similarity
-   alone does not tell the sources apart by pitch). Rows are ordered by that score:
-   **1. Best match**, then **2.** and **3. Close match**. If the test-clone is
-   not possible (for example while a voice trains), the shortlist order is kept
-   and the window says so.
+5. **Results and rank:** each shortlisted voice speaks the clip's Whisper
+   transcript at its suggested speed (`voicematch.speak()`), and the speech is
+   cloned with Seed-VC using the clip (silences removed, 25 s) as the
+   reference. Each Result's voiceprint is compared with the clip, minus the same
+   pitch penalty (the converted result takes the clip's timbre whatever the
+   source, so similarity alone does not tell the sources apart by pitch). Rows
+   are ordered by that score: **1. Best match**, then **2.** and **3. Close
+   match**. A voice whose Result fails is listed after the others. With no
+   words in the clip, or no Result at all, the shortlist order is kept and the
+   window says so. The ranking shows once all Results are made; Cancel stops
+   the whole run.
 
-Each row shows pitch against the clip and a suggested speed (Kokoro / Melo
-speed, pyttsx3 WPM) so the voice talks at the clip's pace. **▶ Sample** plays
-the engine voice, **▶ Original** the clip as it was analyzed (trimmed, and
-cleaned when music removal is on, up to 60 s) and **▶ Result** its cloned
-test; all are play / stop toggles on one channel. **Apply** calls `EnginePanel.apply_voice_selection()` and closes
-the window; the controls stay editable.
+The bank recordings are only used for the shortlist; a run speaks and clones
+nothing else (before 2026-10-13 it also test-cloned the bank sentence for each
+voice, ▶ Sample, and played the bank recording, ▶ Base). Each row shows pitch
+against the clip and a suggested speed (Kokoro / Melo speed, pyttsx3 WPM) so
+the voice talks at the clip's pace, and two play / stop toggles on one channel:
 
-Measured on the Arjun clip (bank already built): about 2.3 minutes per run.
-Test-clone scores were 0.88 to 0.91 against 0.60 to 0.70 before cloning. Seed-VC
-is not deterministic, so near-equal candidates can swap places between runs.
+* **▶ Original**: the clip as it was analyzed (trimmed, and cleaned when music
+  removal is on, up to 25 s).
+* **▶ Result**: the clip's words in that voice, cloned, to compare word for
+  word with Original.
+
+**Apply** calls `EnginePanel.apply_voice_selection()`, passes the Result to
+`CloneVoiceGroup._on_match_applied()` (which copies it out of the analyzer's
+temp folder) and closes the window; the controls stay editable. When a voice is
+then created from the same clips, clean-up switches and base voice
+(`_usable_match()`, which compares `EnginePanel.synthesis_key()`), the first
+10 s of that Result become its saved preview (see Saved previews).
+
+Measured on the Arjun clip with the older test-clone ranking (bank already
+built): about 2.3 minutes per run; test-clone scores were 0.88 to 0.91 against
+0.60 to 0.70 before cloning. Seed-VC is not deterministic, so near-equal
+candidates can swap places between runs.
 
 * English only by design; the window warns when Whisper hears another language.
 * MeloTTS French fails in the app venv (its BERT checkpoint needs torch 2.6+)
