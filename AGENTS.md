@@ -574,6 +574,17 @@ graph LR
   `("rvc","train")`. Only one convert worker is alive at a time (4 GB GPU),
   training stops every convert worker, and conversions raise `VCBusy` while a
   voice trains.
+* Overlapping jobs (a generation, the analyzer, previews, clean-up) queue
+  instead of failing. Each worker runs one request at a time (`_Worker.busy`).
+  A worker that must make way for the other engine is stopped only after its
+  running request ends (`VCClient._worker` waits outside the client lock, so
+  `is_warm()` on the Tk thread never blocks), and a queued request whose worker
+  was stopped meanwhile starts it again (`_WorkerGone`, retried by
+  `VCClient._request`). Waiting still honours Cancel, and status callbacks get
+  `client.WAITING`. Before 2026-10-13 the switch killed the running request
+  ("The Seed-VC convert worker stopped unexpectedly" when the analyzer's music
+  removal started during a generation). Each switch reloads the other model,
+  so overlapping jobs on different engines take longer; results are unchanged.
 * Workers exit after 5 minutes idle, when the app closes their stdin, or on
   `shutdown`. `AditsVoiceStudioApp.destroy()` calls `shutdown_client()`.
 * `AditsVoiceStudioApp._engine_lock` serializes every `engine.synthesize()` call,

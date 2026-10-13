@@ -13,6 +13,13 @@ GPU policy for a 4 GB card: only one convert worker is alive at a time
 conversions are refused while training runs. Workers exit on their own
 after `idle_seconds` without work, which frees their GPU memory.
 
+Jobs from different parts of the app (a generation, the analyzer, a preview)
+may overlap. Each worker runs one request at a time and the others queue; a
+worker that has to make way for the other engine is stopped only between
+requests, never in the middle of one, so overlapping jobs take longer but
+none fails or changes. A queued request whose worker was stopped meanwhile
+starts it again (_WorkerGone → retry in VCClient._request).
+
 All methods block; call them from a worker thread, never the Tk main thread.
 """
 
@@ -34,6 +41,25 @@ def _abs(path):
 
 _CANCEL_GRACE = 8.0      # seconds a worker gets to report a cancel before it is killed
 _READY_TIMEOUT = 90.0
+WAITING = "Waiting for another voice cloning job to finish…"
+
+
+class _WorkerGone(Exception):
+    """The worker was stopped while this request waited its turn; get it again."""
+
+
+def _acquire(lock, cancel_event=None, on_wait=None):
+    """Take *lock*, waiting as long as it takes; VCCancelled if cancel_event is set meanwhile."""
+    told = False
+    while not lock.acquire(timeout=0.25):
+        if cancel_event is not None and cancel_event.is_set():
+            raise VCCancelled()
+        if on_wait is not None and not told:
+            told = True
+            try:
+                on_wait()
+            except Exception:
+                pass
 
 
 class _Worker:
@@ -102,10 +128,14 @@ class _Worker:
             except (OSError, ValueError, AttributeError) as e:
                 raise VCWorkerError("generic", f"The {self.label} is not responding ({e}).")
 
-    def request(self, payload, cancel_event=None, on_event=None, timeout=None):
+    def request(self, payload, cancel_event=None, on_event=None, timeout=None, on_wait=None):
+        """Send one request and wait for its result. Queues behind a request already running."""
         rid = uuid.uuid4().hex[:12]
         q = queue.Queue()
-        with self.busy:
+        _acquire(self.busy, cancel_event, on_wait)
+        try:
+            if not self.alive():
+                raise _WorkerGone()
             with self._pending_lock:
                 self._pending[rid] = q
             try:
@@ -154,6 +184,8 @@ class _Worker:
                 with self._pending_lock:
                     self._pending.pop(rid, None)
                 self.last_used = time.monotonic()
+        finally:
+            self.busy.release()
 
     def shutdown(self, wait=3.0):
         if not self.alive():
@@ -186,29 +218,50 @@ class VCClient:
     def training_active(self) -> bool:
         return self._training.is_set()
 
-    def _worker(self, engine, role) -> _Worker:
+    def _worker(self, engine, role, cancel_event=None, on_wait=None) -> _Worker:
         if not runtime.is_installed(engine):
             raise VCNotInstalled(f"{runtime.ENGINES[engine]['label']} is not installed.",
                                  hint="Use Install… in the Clone Voice section.")
-        with self._lock:
-            # Free the GPU for this worker: one convert worker at a time.
-            for (e, r), w in list(self._workers.items()):
-                if (e, r) == (engine, role):
-                    continue
-                if role == "train" or (role == "convert" and r == "convert"):
-                    w.shutdown()
-            w = self._workers.get((engine, role))
-            if w is None:
-                w = _Worker(engine, role, self.idle_seconds if role == "convert" else 60)
-                self._workers[(engine, role)] = w
-            if not w.alive():
-                w.start()
-            return w
+        while True:
+            with self._lock:
+                # Free the GPU for this worker: one convert worker at a time.
+                others = [w for (e, r), w in self._workers.items()
+                          if (e, r) != (engine, role) and w.alive()
+                          and (role == "train" or (role == "convert" and r == "convert"))]
+                if not others:
+                    w = self._workers.get((engine, role))
+                    if w is None:
+                        w = _Worker(engine, role, self.idle_seconds if role == "convert" else 60)
+                        self._workers[(engine, role)] = w
+                    if not w.alive():
+                        w.start()
+                    return w
+            # Outside the client lock, so other callers (and is_warm) are not held up:
+            # let each running request finish, then stop its worker.
+            for o in others:
+                _acquire(o.busy, cancel_event, on_wait)
+                try:
+                    o.shutdown()
+                finally:
+                    o.busy.release()
+
+    def _request(self, engine, role, payload, *, cancel_event=None, on_event=None, timeout=None,
+                 status_cb=None):
+        """Run one request on the (engine, role) worker, queuing behind other jobs as needed."""
+        on_wait = (lambda: status_cb(WAITING)) if status_cb else None
+        for _ in range(5):
+            w = self._worker(engine, role, cancel_event, on_wait)
+            try:
+                return w.request(payload, cancel_event=cancel_event, on_event=on_event, timeout=timeout,
+                                 on_wait=on_wait)
+            except _WorkerGone:
+                continue                    # stopped for the other engine while queued: start it again
+        raise VCWorkerError("generic", f"The {runtime.ENGINES[engine]['label']} worker kept being "
+                                       "stopped by other jobs.", hint="Try again when other cloning jobs finish.")
 
     def is_warm(self, engine) -> bool:
         """True when the engine's convert worker is running (no model-load wait)."""
-        with self._lock:
-            w = self._workers.get((engine, "convert"))
+        w = self._workers.get((engine, "convert"))     # no lock: called from the Tk thread
         return w is not None and w.alive()
 
     def shutdown(self, engine=None):
@@ -229,7 +282,7 @@ class VCClient:
 
     # ── requests ───────────────────────────────────────────────────
     def selfcheck(self, engine) -> dict:
-        return self._worker(engine, "convert").request({"cmd": "selfcheck"})
+        return self._request(engine, "convert", {"cmd": "selfcheck"})
 
     def inspect_rvc(self, pth) -> dict:
         """Read an RVC model's metadata on the CPU. Allowed while training."""
@@ -242,7 +295,7 @@ class VCClient:
                 return w.request({"cmd": "inspect", "pth": _abs(pth)}, timeout=120)
             finally:
                 w.shutdown()
-        return self._worker("rvc", "convert").request({"cmd": "inspect", "pth": _abs(pth)}, timeout=120)
+        return self._request("rvc", "convert", {"cmd": "inspect", "pth": _abs(pth)}, timeout=120)
 
     def convert(self, profile, in_wav, out_wav, *, pitch=None, index_rate=None, protect=None,
                 diffusion_steps=None, cancel_event=None, status_cb=None) -> dict:
@@ -269,8 +322,8 @@ class VCClient:
 
         if status_cb:
             status_cb(f"Starting {runtime.ENGINES[profile.mode]['label']}…")
-        w = self._worker(profile.mode, "convert")
-        return w.request(payload, cancel_event=cancel_event, on_event=on_event)
+        return self._request(profile.mode, "convert", payload, cancel_event=cancel_event, on_event=on_event,
+                             status_cb=status_cb)
 
     def separate(self, in_wav, out_wav, *, denoise=False, cancel_event=None, status_cb=None) -> dict:
         """Remove background music (and optionally steady noise) from in_wav.
@@ -284,19 +337,17 @@ class VCClient:
             if status_cb and ev.get("event") == "progress" and ev.get("message"):
                 status_cb(ev["message"])
 
-        w = self._worker("rvc", "convert")
-        return w.request({"cmd": "separate", "in": _abs(in_wav), "out": _abs(out_wav),
-                          "denoise": bool(denoise)},
-                         cancel_event=cancel_event, on_event=on_event)
+        return self._request("rvc", "convert", {"cmd": "separate", "in": _abs(in_wav), "out": _abs(out_wav),
+                                                "denoise": bool(denoise)},
+                             cancel_event=cancel_event, on_event=on_event, status_cb=status_cb)
 
     def embed(self, files, *, cancel_event=None, status_cb=None) -> list:
         """CAMPPlus voiceprints (lists of 192 floats, or None) for audio files. CPU only."""
         def on_event(ev):
             if status_cb and ev.get("event") == "progress" and ev.get("message"):
                 status_cb(ev["message"])
-        w = self._worker("seedvc", "convert")
-        res = w.request({"cmd": "embed", "files": [_abs(f) for f in files]},
-                        cancel_event=cancel_event, on_event=on_event)
+        res = self._request("seedvc", "convert", {"cmd": "embed", "files": [_abs(f) for f in files]},
+                            cancel_event=cancel_event, on_event=on_event, status_cb=status_cb)
         return res.get("embeddings") or []
 
     def convert_reference(self, in_wav, ref_wav, out_wav, *, diffusion_steps=10, cancel_event=None,
@@ -311,10 +362,10 @@ class VCClient:
         def on_event(ev):
             if status_cb and ev.get("event") == "progress" and ev.get("message"):
                 status_cb(ev["message"])
-        w = self._worker("seedvc", "convert")
-        return w.request({"cmd": "convert", "in": _abs(in_wav), "ref": _abs(ref_wav), "out": _abs(out_wav),
-                          "diffusion_steps": int(diffusion_steps)},
-                         cancel_event=cancel_event, on_event=on_event)
+        return self._request("seedvc", "convert",
+                             {"cmd": "convert", "in": _abs(in_wav), "ref": _abs(ref_wav), "out": _abs(out_wav),
+                              "diffusion_steps": int(diffusion_steps)},
+                             cancel_event=cancel_event, on_event=on_event, status_cb=status_cb)
 
     def train_rvc(self, profile, dataset_dir, *, epochs=150, batch_size=2, sample_rate=40000,
                   save_every_epoch=10, keep_checkpoints=False, fresh=True,
@@ -327,8 +378,6 @@ class VCClient:
             raise VCBusy("Another voice is already training.")
         self._training.set()
         try:
-            w = self._worker("rvc", "train")
-
             def on_event(ev):
                 if ev.get("event") == "progress" and progress_cb:
                     progress_cb(ev)
@@ -340,6 +389,6 @@ class VCClient:
                        "epochs": int(epochs), "batch_size": int(batch_size),
                        "save_every_epoch": int(save_every_epoch), "fresh": bool(fresh),
                        "keep_checkpoints": bool(keep_checkpoints)}
-            return w.request(payload, cancel_event=cancel_event, on_event=on_event)
+            return self._request("rvc", "train", payload, cancel_event=cancel_event, on_event=on_event)
         finally:
             self._training.clear()
