@@ -11,6 +11,7 @@ Text input card — textarea + live character counter.
     │ ▬▬▬▬▬▬ progress ▬▬▬▬▬▬                     [✖ Cancel] │   Transcribe
     │ Transcribing... 42%                                    │
     └───────────────────────────────────────────────────────┘
+    [Copy] [Paste] [Paste & Replace] [Clear] [↶] [↷]    1,234 characters
 
 + opens a menu: Import captions or text (core.captions), and Transcribe
 audio or video (core.subtitles.transcribe_file). 🎤 (live dictation) is not
@@ -19,6 +20,9 @@ built yet.
 Imported text replaces the box when it is empty or still holds SAMPLE_TEXT.
 When it holds the user's own text, a prompt asks Replace / Append / Cancel.
 Either way the change is one undo step, so Ctrl+Z brings the old text back.
+The footer buttons work the same way: Paste adds the clipboard after the
+user's text (or replaces the sample), Paste & Replace and Clear replace it,
+and each is one undo step. ↶ / ↷ are greyed out when there is nothing to undo.
 
 Transcription runs on a thread and adds each Whisper segment to the box as it
 arrives; the box is read-only until it ends. Cancel keeps the text so far.
@@ -195,14 +199,31 @@ class TextPanel:
         self.text_input.pack(fill=pack_fill, expand=pack_expand, padx=16, pady=(0, 4))
         self.text_input.insert("1.0", SAMPLE_TEXT)
         self.text_input.edit_reset()        # Ctrl+Z must not remove the sample itself
+        self.text_input.edit_modified(False)    # so the first edit sends <<Modified>>
 
+        # Footer: edit buttons on the left, character count on the right.
+        foot = ctk.CTkFrame(frame, fg_color="transparent")
+        foot.pack(fill="x", padx=16, pady=(2, 10))
+        self._foot = foot
+        self._copy_btn = self._foot_btn("Copy", self._copy_all, "Copy all the text.")
+        self._foot_btn("Paste", self._paste_append,
+                       "Paste the copied text after yours (or in place of the sample).")
+        self._foot_btn("Paste & Replace", self._paste_replace, "Replace all the text with the copied text.")
+        self._foot_btn("Clear", self._clear_all, "Clear the box. Undo brings the text back.")
+        self._undo_btn = self._foot_btn("↶", lambda: self._tb.event_generate("<<Undo>>"), "Undo (Ctrl+Z)",
+                                        icon=True, padx=(8, 0))
+        self._redo_btn = self._foot_btn("↷", lambda: self._tb.event_generate("<<Redo>>"), "Redo (Ctrl+Y)",
+                                        icon=True)
         self._char_label = ctk.CTkLabel(
-            frame, text="0 characters",
+            foot, text="0 characters",
             font=FONTS["body_small"],
             text_color=COLORS["text_muted"],
         )
-        self._char_label.pack(anchor="e", padx=20, pady=(0, 10))
-        self.text_input.bind("<KeyRelease>", self._update)
+        self._char_label.pack(side="right", padx=(8, 4))
+        self._count_job = None
+        # Count on any change (typing, paste, drag-and-drop, the buttons), once per idle.
+        self._tb.bind("<<Modified>>", self._on_modified, add="+")
+        self._tb.bind("<<UndoStack>>", lambda e: self._update_undo_buttons(), add="+")
         self.text_input.bind("<Escape>", lambda e: self._stop_dictation())
         self._tb.tag_configure(LIVE_TAG, foreground=COLORS["text_muted"])
         # Live text is kept out of the undo history; take it out before an undo
@@ -210,7 +231,18 @@ class TextPanel:
         self._tb.bind("<<Undo>>", lambda e: self._clear_live(), add="+")
         self._build_media_strip(frame)
         self._update()
+        self._update_undo_buttons()
 
+    def _foot_btn(self, text, command, tip, icon=False, padx=(0, 6)):
+        """A small outlined button in the footer row, packed from the left."""
+        font = ("Segoe UI Symbol", 17, "bold") if icon else FONTS["body_small"]
+        btn = ctk.CTkButton(self._foot, text=text, width=30 if icon else 44, height=26, corner_radius=7,
+                            font=font, fg_color="transparent", hover_color=COLORS["bg_input"],
+                            text_color=COLORS["text_primary"], text_color_disabled=COLORS["text_muted"],
+                            border_width=1, border_color=COLORS["border"], command=command)
+        btn.pack(side="left", padx=padx)
+        _Tip(btn, tip)
+        return btn
     def _build_media_strip(self, frame):
         """Player and transcription progress for an audio or video file; packed when used."""
         strip = ctk.CTkFrame(frame, fg_color=COLORS["bg_input"], corner_radius=10,
@@ -257,10 +289,89 @@ class TextPanel:
             wraplength=max(100, e.width / strip._get_widget_scaling() - 30)), add="+")
 
     def _update(self, _event=None):
+        if self._count_job is not None:
+            self._tb.after_cancel(self._count_job)
+            self._count_job = None
         count = len(self.get_text())
         self._char_label.configure(
             text=f"{count:,} character{'s' if count != 1 else ''}"
         )
+
+    def _on_modified(self, _event=None):
+        """Tk sends <<Modified>> once per change of the flag; reset it and
+        count when idle, so a burst of edits is counted once."""
+        tb = self._tb
+        if not tb.edit_modified():
+            return                          # the reset below fires this too
+        tb.edit_modified(False)
+        if self._count_job is None:
+            self._count_job = tb.after_idle(self._update)
+
+    def _update_undo_buttons(self):
+        tb = self._tb
+        for btn, cmd in ((self._undo_btn, "canundo"), (self._redo_btn, "canredo")):
+            try:
+                can = bool(tb.tk.getboolean(tb.tk.call(tb._w, "edit", cmd)))
+            except tk.TclError:
+                can = True
+            btn.configure(state="normal" if can else "disabled")
+
+    # ── footer buttons ─────────────────────────────────────────────
+    def _clipboard_text(self):
+        """The clipboard's text, or None when it holds no text."""
+        try:
+            text = self.frame.clipboard_get()
+        except tk.TclError:
+            return None
+        return text.replace("\r\n", "\n") or None
+
+    def _editable(self):
+        """False while a transcription is writing into the box."""
+        if self._job is not None:
+            self._set_job_status("Wait for the transcription to finish, or cancel it.", self._job)
+            return False
+        self._clear_live()                  # gray dictation text is not part of the text yet
+        return True
+
+    def _copy_all(self):
+        text = self.get_text()
+        if not text:
+            return
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(text)
+        self._copy_btn.configure(text="Copied")
+        self.frame.after(1200, lambda: self._copy_btn.configure(text="Copy"))
+
+    def _paste_append(self):
+        text = self._clipboard_text()
+        if text is None or not self._editable():
+            return
+        # an empty box or the sample is replaced; the user's own text is kept
+        mode = "append" if self.has_own_text() else "replace"
+        self._put(text, mode)
+
+    def _paste_replace(self):
+        text = self._clipboard_text()
+        if text is None or not self._editable():
+            return
+        self._put(text, "replace")
+
+    def _clear_all(self):
+        if not self._editable() or not self._tb.get("1.0", "end-1c"):
+            return
+        self._put("", "replace")
+        self.text_input.focus_set()
+
+    def _put(self, text, mode):
+        """Replace or append text as one undo step, cursor at its end."""
+        tb = self._tb
+        self._begin_edit(mode)
+        try:
+            tb.insert("end-1c", text)
+            tb.mark_set("insert", "end-1c")
+            tb.see("insert")
+        finally:
+            self._end_edit()
 
     def get_text(self) -> str:
         """The box's text, without gray live dictation (not final yet)."""
@@ -598,7 +709,7 @@ class TextPanel:
         self._pl_seek.configure(to=1.0)
         self._pl_seek_var.set(0.0)
         self._pl_time.configure(text="0:00 / –")
-        self._strip.pack(fill="x", padx=16, pady=(4, 2), before=self._char_label)
+        self._strip.pack(fill="x", padx=16, pady=(4, 2), before=self._foot)
 
     def _close_media(self):
         self._cancel_job()
