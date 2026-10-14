@@ -3,8 +3,8 @@
 Move the Adits Voice Studio UI from CustomTkinter to PySide6 (Qt 6), one phase
 at a time, with the app usable after every phase.
 
-Status, 2026-10-14: Phase 1 done (not yet committed). Phase 0 skipped for now:
-no branch, no PySide6 install yet.
+Status, 2026-10-14: Phase 1 and Phase 0 done on branch `qt-migration`.
+Next: Phase 2.
 
 ---
 
@@ -75,6 +75,26 @@ one developer working with an AI assistant, not measurements.
 
 **Done when:** the branch exists, PySide6 imports in `venv_311`, and the
 checklist is written.
+
+**Result (2026-10-14):**
+
+* Installed `PySide6-Essentials==6.11.2` (QtCore, QtGui, QtWidgets; no
+  Addons). 6.12.0 was the newest, but 6.11.2 has had bug-fix releases.
+  `requirements.txt` pins `>=6.11.2,<6.12`. The install added only
+  `shiboken6`. The `pip check` warnings it printed (`styletts2`,
+  `simpler-kokoro`) were already there and do not involve Qt.
+* Checked in both import orders (torch then Qt, Qt then torch): a
+  `QApplication` with a window, a CUDA matmul on the GTX 1650,
+  `pygame.mixer.init()` plus `mixer.music` playback, and a worker thread
+  emitting a `Signal` that Qt delivered on the GUI thread. All passed.
+* At 125% Windows scaling Qt reported a device pixel ratio of 1.25 and
+  drew a 500x300 window at 625x375 physical pixels. Emoji (🎤 ♡ ✏️) rendered
+  in color. With no style sheet, Qt followed the Windows dark mode.
+* Checklist: [ui-parity-checklist.md](ui-parity-checklist.md), with a list
+  of possible bugs found in the current UI.
+* Playback row quick fix skipped: the clipped labels are a layout issue, but
+  the black areas are CTk redraw glitches a layout change would not fix, and
+  Phase 2 rebuilds this panel first.
 
 ### Phase 1. Separate logic from the UI, still on CTk (rough guess: 2 to 3 days)
 
