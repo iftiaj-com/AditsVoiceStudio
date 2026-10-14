@@ -774,6 +774,11 @@ To launch the application from source code:
    ```powershell
    .\run.ps1
    ```
+4. The Qt window (PySide6, being built to replace the CustomTkinter one; see
+   `docs/pyside6-migration-plan.md`) starts with `--qt`, or with `ADITS_UI=qt`:
+   ```powershell
+   .\venv_311\Scripts\python.exe tts_app.py --qt
+   ```
 
 ### Compiling to Portable EXE
 You can package Adits Voice Studio into a standalone Windows directory:
@@ -792,7 +797,8 @@ You can package Adits Voice Studio into a standalone Windows directory:
    * prunes build-only files (`torch/lib/*.lib`, headers, C sources, pygame tests);
    * writes `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` and `licenses/` into the app folder;
    * bundles `vc_runtime/` (worker scripts and pinned requirements) as data, but no cloning libraries;
-   * runs `AditsVoiceStudio.exe --selftest` and stops if any offline engine produces no audio.
+   * bundles PySide6 next to CustomTkinter (both windows ship until the Qt one becomes the default), drops `PySide6/translations` (the app is English), and lists Qt / PySide6 under the LGPL-3.0 in the notices (their packages ship only Qt's commercial license file, which the notice generator skips);
+   * runs `AditsVoiceStudio.exe --selftest` and stops if any offline engine produces no audio, or if the Qt window cannot be built (`qt_window` builds the real window on the Windows platform plugin without showing it, which catches a missing `qwindows.dll`).
 3. Once completed, the distribution is saved in the `./dist/AditsVoiceStudio/` folder (dominated by the CUDA build of PyTorch). Run `AditsVoiceStudio.exe` to launch the portable app.
 
 ### Building a Windows Installer (Setup.exe)

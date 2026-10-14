@@ -3,8 +3,8 @@
 Move the Adits Voice Studio UI from CustomTkinter to PySide6 (Qt 6), one phase
 at a time, with the app usable after every phase.
 
-Status, 2026-10-14: Phases 0 to 4 committed on branch `qt-migration`.
-Next: Phase 5.
+Status, 2026-10-14: Phases 0 to 5 committed on branch `qt-migration`.
+Next: Phase 6.
 
 ---
 
@@ -352,6 +352,27 @@ parity checklist.
 
 **Done when:** `build_exe.py --installer` produces a Setup.exe whose self-test
 passes and whose window opens at 100%, 125% and 150% scaling.
+
+**Result (2026-10-14):**
+
+* `build_exe.py`: PySide6 added to `_REQUIRED`. CustomTkinter stays (it is
+  still the default window until phase 6), so this build ships both.
+  `PySide6/translations` is pruned (the app is English). PyInstaller's
+  PySide6 hook collected only the Qt modules the app imports: PySide6 and
+  shiboken6 take 67 MB of the 6.19 GiB app folder.
+* Notices: PySide6 and shiboken6 ship only Qt's commercial license file;
+  the generator now skips it, and `licenses/NOTICES_HEADER.txt` lists Qt 6
+  and Qt for Python under the LGPL-3.0 with their source locations.
+* `core/selftest.py`: new `qt_window` check builds the real Qt window on
+  the Windows platform plugin without showing it, then closes it.
+* Build: 37 min. Frozen self-test passed every check (engines 108 s,
+  kokoro, piper_after_kokoro, pyttsx3, mp3_roundtrip, subtitles, nltk_zips,
+  melo_import, qt_window 14 s with platform "windows" and 168 effect
+  tiles, user_dirs). `qwindows.dll` is bundled. The frozen EXE with `--qt`
+  opened its window and closed with no process left.
+* Not done, by choice (2026-10-14): the installer build, the upgrade over
+  an installed copy, and the non-ASCII install path test. Only 125%
+  scaling was available on this machine.
 
 ### Phase 6. Cut-over (rough guess: 1 day, then a soak period)
 
