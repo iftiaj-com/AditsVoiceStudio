@@ -15,8 +15,9 @@ def get_whisper_model():
     skip the multi-second reload without permanently hogging VRAM.
     """
     def _load():
+        from core.gpu import cuda_available, use_torch_cudnn
+        use_torch_cudnn()                   # before ctranslate2 loads its own cudnn64_9.dll
         from faster_whisper import WhisperModel
-        from core.gpu import cuda_available
         from core.paths import bundle_dir
         use_cuda = cuda_available()
         # Installed builds ship Systran/faster-whisper-base so subtitles work

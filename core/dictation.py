@@ -65,6 +65,8 @@ class StreamVAD:
     CONTEXT = 64
 
     def __init__(self):
+        from core.gpu import use_torch_cudnn
+        use_torch_cudnn()                   # before faster_whisper imports ctranslate2 (core/gpu.py)
         from faster_whisper.vad import get_vad_model
         self._session = get_vad_model().session
         self.reset()
