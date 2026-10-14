@@ -14,6 +14,12 @@ self._views[key] and redrawn from that value, which replaces the CTk panel's
 shared BooleanVar. A user click goes through _user_toggle(), which applies
 the exclusive-group rule only for keys that have a group, as the CTk tiles do.
 
+Tiles are drawn by one widget each (_Tile.paintEvent), not built from a
+frame, a switch, a label and a heart button. With 168 effects (134 cloned
+voices) plus their Favourites mirrors that was about 1,000 widgets under the
+app style sheet: a 60 px scroll step of the right column took 31 ms (9.6 ms
+with this card hidden) and a window resize about 100 ms.
+
 Search: as in the CTk panel, matches show in a Results panel laid over the
 top of the tiles (it takes no room, so nothing below moves), at most
 MAX_RESULTS rows, ranked names-first. The favourites file is the same one
@@ -23,7 +29,8 @@ import json
 import os
 import re
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
                                QVBoxLayout, QWidget)
 
@@ -38,6 +45,7 @@ HEART_OFF, HEART_ON = "♡", "♥"
 SEARCH_DELAY_MS = 120   # search once typing pauses
 MAX_RESULTS = 8         # rows in the Results panel
 NUM_COLS = 2            # the CTk panel is packed in the right column: 2 columns
+_HEART_PX = None        # heart icon size, set by the first tile
 SEARCH_TIP = ("Search effects and cloned voices by name or description. Click a result, "
               "or press Enter, to switch it on or off. ↑ ↓ move, Esc clears.")
 
@@ -84,29 +92,160 @@ def _paint_heart(btn, on):
         theme.repolish(btn)
 
 
-class _Tile(QFrame):
-    """One effect: switch and heart on the first line, description below."""
+def _heart_px():
+    f = QFont()
+    f.setPixelSize(15)                  # QPushButton[role="heart"] font-size, as IconButton sizes icons
+    return max(14, QFontMetrics(f).height() - 2)
+
+
+class _Tile(QWidget):
+    """One effect, drawn in one widget: switch, icon and name on the first
+    line with the heart on the right, the description below.
+
+    Same look and geometry as the frame + ToggleSwitch + heart button +
+    ElidedLabel tile it replaces (54 px high; switch row at y 8 to 32, heart
+    30 x 26 at the right, description at x 57). Clicking the switch row
+    toggles the effect, clicking the heart favourites it.
+    """
+    H = 54
+    PAD_L, PAD_R = 11, 6
+    SW_Y, SW_H = 8, 24
+    HEART_W, HEART_H, HEART_Y = 30, 26, 7
+    TRACK_W, TRACK_H, GAP = ToggleSwitch.TRACK_W, ToggleSwitch.TRACK_H, ToggleSwitch.GAP
+    DESC_X, DESC_Y, DESC_H = 57, 33, 14
 
     def __init__(self, panel, key, label, desc, on):
         super().__init__()
-        self.setObjectName("tile")
+        self._panel, self._key = panel, key
+        self._on = bool(on)
+        self._fav = key in panel._fav_keys
+        self._hover = None              # "switch" | "heart" | None
+        lead, self._label = icons.split(label)
+        self._icon = icons.effect_icon(key) or lead
+        self._desc = desc or ""
+        self._font = theme.font("body")
+        self._desc_font = QFont("Segoe UI")         # QLabel#tileDesc in the style sheet
+        self._desc_font.setPixelSize(10)
+        self._fm = QFontMetrics(self._font)
+        global _HEART_PX
+        if _HEART_PX is None:
+            _HEART_PX = _heart_px()
+        self._dfm = QFontMetrics(self._desc_font)
+        self.setFixedHeight(self.H)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)   # equal columns, like CTk "uniform"
-        g = QGridLayout(self)
-        g.setContentsMargins(10, 6, 6, 6)
-        g.setHorizontalSpacing(4)
-        g.setVerticalSpacing(0)
-        g.setColumnStretch(0, 1)
-        self.switch = ToggleSwitch(label, on, icon=icons.effect_icon(key))
-        self.switch.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
-        self.switch.clicked.connect(lambda checked: panel._user_toggle(key, checked))
-        g.addWidget(self.switch, 0, 0)
-        self.heart = _heart(key in panel._fav_keys)
-        self.heart.clicked.connect(lambda: panel.toggle_favourite(key))
-        g.addWidget(self.heart, 0, 1)
-        self.desc = ElidedLabel(desc)
-        self.desc.setObjectName("tileDesc")
-        g.addWidget(self.desc, 1, 0, 1, 2)
-        self.desc.setContentsMargins(46, 0, 0, 0)      # under the switch's text, like CTk padx=42
+        self.setMouseTracking(True)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, False)
+
+    # what the panel calls (the old tile's switch / heart did these)
+    def isChecked(self):
+        return self._on
+
+    def setChecked(self, on):
+        if bool(on) != self._on:
+            self._on = bool(on)
+            self.update(self._switch_rect().toAlignedRect())
+
+    def set_favourite(self, on):
+        if bool(on) != self._fav:
+            self._fav = bool(on)
+            self.update(self._heart_rect().toAlignedRect())
+
+    def set_label(self, label):
+        lead, self._label = icons.split(label)
+        self._icon = icons.effect_icon(self._key) or lead
+        self.update()
+
+    def sizeHint(self):
+        return QSize(260, self.H)
+
+    # geometry
+    def _heart_rect(self):
+        return QRectF(self.width() - self.PAD_R - self.HEART_W, self.HEART_Y, self.HEART_W, self.HEART_H)
+
+    def _switch_rect(self):
+        right = self.width() - self.PAD_R - self.HEART_W - 4
+        return QRectF(self.PAD_L, self.SW_Y, max(0, right - self.PAD_L), self.SW_H)
+
+    def _part(self, pos):
+        if self._heart_rect().contains(pos):
+            return "heart"
+        if self._switch_rect().contains(pos):
+            return "switch"
+        return None
+
+    # input
+    def mouseMoveEvent(self, e):
+        part = self._part(e.position())
+        if part != self._hover:
+            self._hover = part
+            self.setCursor(Qt.PointingHandCursor if part else Qt.ArrowCursor)
+            self.update()
+
+    def leaveEvent(self, e):
+        if self._hover is not None:
+            self._hover = None
+            self.update()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        part = self._part(e.position())
+        if part == "switch":
+            self.setChecked(not self._on)
+            self._panel._user_toggle(self._key, self._on)
+        elif part == "heart":
+            self._panel.toggle_favourite(self._key)
+
+    # drawing
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        # card: bg_input, 1 px border, radius 10 (QFrame#tile in the style sheet)
+        p.setPen(QPen(QColor(COLORS["border"]), 1))
+        p.setBrush(QColor(COLORS["bg_input"]))
+        p.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        # switch track and knob (as ToggleSwitch.paintEvent)
+        sw = self._switch_rect()
+        h, w = self.TRACK_H, self.TRACK_W
+        y = sw.top() + (sw.height() - h) / 2
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(COLORS["switch_on"] if self._on else COLORS["switch_off"]))
+        p.drawRoundedRect(QRectF(sw.left(), y, w, h), h / 2, h / 2)
+        k = 2
+        x0 = sw.left() + (w - h if self._on else 0)
+        p.setBrush(QColor(COLORS["accent_secondary"] if self._hover == "switch" else COLORS["accent_primary"]))
+        p.drawEllipse(QRectF(x0 + k, y + k, h - 2 * k, h - 2 * k))
+        # icon and name
+        text_color = QColor(COLORS["text_primary"])
+        left = sw.left() + w + self.GAP
+        if self._icon:
+            size = max(14, self._fm.height() - 2)
+            p.drawPixmap(int(left), int(round(sw.top() + (sw.height() - size) / 2)),
+                         icons.pixmap(self._icon, text_color, size))
+            left += size + 6                # widgets.ICON_GAP
+        p.setPen(text_color)
+        p.setFont(self._font)
+        name = self._fm.elidedText(self._label, Qt.ElideRight, int(max(0, sw.right() - left)))
+        p.drawText(QRectF(left, sw.top(), max(0, sw.right() - left), sw.height()),
+                   Qt.AlignVCenter | Qt.AlignLeft, name)
+        # heart (QPushButton[role="heart"]: hover background bg_card, accent when on)
+        hr = self._heart_rect()
+        if self._hover == "heart":
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(COLORS["bg_card"]))
+            p.drawRoundedRect(hr, 6, 6)
+        hs = _HEART_PX
+        hcolor = COLORS["accent_primary"] if self._fav else COLORS["text_muted"]
+        p.drawPixmap(int(round(hr.center().x() - hs / 2)), int(round(hr.center().y() - hs / 2)),
+                     icons.pixmap("heart-filled" if self._fav else "heart", hcolor, hs))
+        # description
+        if self._desc:
+            p.setPen(QColor(COLORS["text_muted"]))
+            p.setFont(self._desc_font)
+            dw = max(0, self.width() - self.PAD_R - self.DESC_X)
+            p.drawText(QRectF(self.DESC_X, self.DESC_Y, dw, self.DESC_H), Qt.AlignVCenter | Qt.AlignLeft,
+                       self._dfm.elidedText(self._desc, Qt.ElideRight, int(dw)))
 
 
 class _ResultRow(QFrame):
@@ -471,7 +610,7 @@ class EffectsPanel:
             self._groups[key] = group
         tile = _Tile(self, key, label, desc, self._on[key])
         self._tiles[key] = tile
-        self._views[key] = [tile.switch]
+        self._views[key] = [tile]
         if key in self._fav_keys:
             self._add_mirror(key)
 
@@ -480,13 +619,13 @@ class EffectsPanel:
             return
         tile = _Tile(self, key, self._labels[key], self._descs.get(key, ""), self._on[key])
         self._fav_tiles[key] = tile
-        self._views[key].append(tile.switch)
+        self._views[key].append(tile)
 
     def _remove_mirror(self, key):
         tile = self._fav_tiles.pop(key, None)
         if tile is not None:
-            if key in self._views and tile.switch in self._views[key]:
-                self._views[key].remove(tile.switch)
+            if key in self._views and tile in self._views[key]:
+                self._views[key].remove(tile)
             tile.setParent(None)
             tile.deleteLater()
 
@@ -494,7 +633,7 @@ class EffectsPanel:
         on = key in self._fav_keys
         for t in (self._tiles.get(key), self._fav_tiles.get(key)):
             if t is not None:
-                _paint_heart(t.heart, on)
+                t.set_favourite(on)
         row = self._res_by_key.get(key)
         if row is not None:
             _paint_heart(row.heart, on)
@@ -587,8 +726,7 @@ class EffectsPanel:
                 self._labels[key] = effect["label"]
                 for t in (self._tiles[key], self._fav_tiles.get(key)):
                     if t is not None:
-                        t.switch.setText(effect["label"])
-                        t.switch.update()
+                        t.set_label(effect["label"])
         self._regrid()
         if self._query:                     # new, renamed or deleted voices may match now
             self._refresh_results()
