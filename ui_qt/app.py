@@ -3,11 +3,10 @@ ui_qt/app.py
 ────────────
 MainWindow: the Qt main window, started with `tts_app.py --qt`.
 
-Phase 2 of docs/pyside6-migration-plan.md: header, two-column layout, status
-bar, the Text Input and Playback & Export panels, and the full generation,
-playback and save flow through core.pipeline. The right column (TTS Engine,
-Customization, Voice Effects) comes in Phase 3; until then Generate uses the
-panels' starting settings from core.defaults.
+Header, two-column layout, status bar, and the panels ported so far (phases
+2 and 3 of docs/pyside6-migration-plan.md): Text Input and Playback & Export
+on the left; TTS Engine, Customization and Voice Effects on the right. The
+Clone Voice group and its dialogs come in phase 4.
 
 Threads: the generation worker never touches a widget. It reports through
 ui_qt.bridge.ui(), which runs the call on the GUI thread.
@@ -27,13 +26,16 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, Q
                                QMainWindow, QMessageBox, QScrollArea, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-from core import defaults, paths, pipeline
+from core import paths, pipeline
 from core.constants import COLORS
 from core.playback import Player
 from core.synth import Synthesizer
 from core.version import APP_TITLE
 from ui_qt import bridge, theme
 from ui_qt.bridge import ui
+from ui_qt.panels.customization_panel import CustomizationPanel
+from ui_qt.panels.effects_panel import EffectsPanel
+from ui_qt.panels.engine_panel import EnginePanel
 from ui_qt.panels.playback_panel import PlaybackPanel
 from ui_qt.panels.text_panel import TextPanel
 
@@ -144,7 +146,11 @@ class MainWindow(QMainWindow):
         self._right_l = QVBoxLayout(right_body)
         self._right_l.setContentsMargins(0, 0, 6, 0)
         self._right_l.setSpacing(12)
-        self._right_l.addWidget(self._placeholder_card())
+        self._engine_panel = EnginePanel(self._available_engines, self._system_voices)
+        self._cust_panel = CustomizationPanel()
+        self._effects_panel = EffectsPanel(on_edit_clones=self._open_voice_manager)
+        for panel in (self._engine_panel, self._cust_panel, self._effects_panel):
+            self._right_l.addWidget(panel.frame)
         self._right_l.addStretch(1)
         right.setWidget(right_body)
 
@@ -174,29 +180,26 @@ class MainWindow(QMainWindow):
         outer.addWidget(bar)
         self.set_status("Ready — Enter text and click Generate")
 
-    def _placeholder_card(self):
-        eng = defaults.engine_settings(list(self.synth.engine_map), self._system_voices)
-        frame, lay = theme.card("🔊  TTS Engine · ⚙️  Customization · ✨  Voice Effects")
-        voice = {"Kokoro": eng["kokoro_voice_key"], "Piper": "first Piper voice",
-                 "Melo": "first MeloTTS voice", "Edge": eng["edge_voice_key"],
-                 "gTTS": eng["gtts_lang_key"], "pyttsx3": "first system voice"}
-        name = eng["engine_name"]
-        voice_text = next((v for k, v in voice.items() if k in name), "default voice")
-        text = (f"These panels move to Qt in Phase 3 of the migration.\n\n"
-                f"Until then, Generate uses their starting settings:\n"
-                f"• Engine: {name}, {voice_text}, speed 1.0\n"
-                f"• GPU: {'on' if eng['use_gpu'] else 'off'}\n"
-                f"• Effects: Normalize only. No ambiance, EQ or subtitles.\n\n"
-                f"To change them, use the CustomTkinter UI (run without --qt).")
-        body = theme.label(text, secondary=True)
-        body.setWordWrap(True)
-        lay.addWidget(body)
-        return frame
+    def _open_voice_manager(self):
+        """✏️ in Cloned Voices. The Cloned Voices dialog is ported in phase 4."""
+        QMessageBox.information(
+            self, "Cloned Voices",
+            "Renaming, editing and deleting cloned voices moves to this window in the next "
+            "step of the migration.\n\nUntil then, use the classic window (run without --qt). "
+            "Cloned voices already work here: switch one on in Voice Effects.")
 
     # ── what panels may use (same names as AditsVoiceStudioApp) ────
     @property
+    def engine_panel(self):
+        return self._engine_panel
+
+    @property
     def text_panel(self):
         return self._text_panel
+
+    @property
+    def cust_panel(self):
+        return self._cust_panel
 
     @property
     def system_voices(self):
@@ -220,14 +223,12 @@ class MainWindow(QMainWindow):
         self._start_generation(preview=True)
 
     def _current_request(self, text, preview):
-        """Settings for a run, read on the GUI thread. Phase 3 replaces the
-        defaults with the ported panels' get_settings()."""
-        from effects.registry import EFFECTS_REGISTRY
+        """Settings for a run, read here on the GUI thread; the worker gets plain values."""
         return pipeline.GenerationRequest(
             text=text,
-            eng_settings=defaults.engine_settings(list(self.synth.engine_map), self._system_voices),
-            cust_settings=defaults.customization_settings(),
-            fx_active=defaults.active_effects(EFFECTS_REGISTRY),
+            eng_settings=self._engine_panel.get_settings(),
+            cust_settings=self._cust_panel.get_settings(),
+            fx_active=self._effects_panel.get_active_effects(),
             preview=preview,
         )
 
@@ -361,6 +362,9 @@ class MainWindow(QMainWindow):
         if self._audio_error:
             self.set_status("⚠  No audio output device — save the file to listen", COLORS["warning"])
             return
+        amb = self._cust_panel.ambiance_channel
+        if amb and amb.get_busy():
+            amb.pause()
         self._player.play(pf)
         pp = self._play_panel
         pp.play_btn.setText("▶  Playing…")
@@ -388,15 +392,22 @@ class MainWindow(QMainWindow):
         pp.stop_btn.setEnabled(False)
         pp.set_progress(0)
 
+    def _resume_ambiance(self):
+        amb = self._cust_panel.ambiance_channel
+        if amb:
+            amb.unpause()
+
     def _on_playback_done(self):
         self._reset_play_buttons()
         self.set_status("✅  Playback complete", COLORS["success"])
+        self._resume_ambiance()
 
     def _on_stop(self):
         if self._player.stop():
             self._play_timer.stop()
             self._reset_play_buttons()
             self.set_status("⏹  Playback stopped", COLORS["text_muted"])
+            self._resume_ambiance()
 
     # ── save / export ──────────────────────────────────────────────
     def _default_name(self, fallback, ext):
@@ -500,6 +511,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Voice cloning shutdown failed: {e}")
         self._cleanup_tmp_dirs()
+        self._cust_panel.cleanup()          # ambiance preview temp files
         event.accept()
 
 

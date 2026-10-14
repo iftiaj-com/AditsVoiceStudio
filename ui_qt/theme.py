@@ -12,10 +12,11 @@ Buttons get a look through the "role" property (see ROLE_* below), not one
 style per button, so the sheet stays in one place.
 """
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPolygonF
 from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout
 
+from core import paths
 from core.constants import COLORS, FONTS
 
 C = COLORS
@@ -50,7 +51,28 @@ def _px(key):
     return f"font-family: '{FONTS[key][0]}'; font-size: {FONTS[key][1]}px;"
 
 
+def _arrow_image() -> str:
+    """A small white down arrow for QComboBox, drawn once and saved as PNG.
+
+    Style sheets cannot draw a triangle, and an SVG would need Qt's SVG
+    image plugin. Drawn at 2x and shown at 10x6, so it stays sharp at 200%.
+    """
+    path = paths.user_dir("ui") / "combo_arrow.png"
+    img = QImage(20, 12, QImage.Format_ARGB32)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor("#FFFFFF"))
+    p.drawPolygon(QPolygonF([QPointF(1, 1), QPointF(19, 1), QPointF(10, 11)]))
+    p.end()
+    img.save(str(path))
+    return path.as_posix()
+
+
 def stylesheet() -> str:
+    """The app's style sheet. Needs a QApplication (it draws the combo arrow)."""
+    arrow = _arrow_image()
     return f"""
 QWidget {{
     color: {C['text_primary']};
@@ -188,6 +210,83 @@ QScrollBar::handle:vertical:hover {{ background: {C['accent_primary']}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
+QFrame#inset {{
+    background: {C['bg_input']};
+    border: 1px solid {C['border']};
+    border-radius: 10px;
+}}
+QFrame#inset QLabel, QFrame#tile QLabel {{ background: transparent; }}
+QFrame#tile {{
+    background: {C['bg_input']};
+    border: 1px solid {C['border']};
+    border-radius: 10px;
+}}
+QFrame#separator {{ background: {C['border']}; max-height: 1px; min-height: 1px; border: none; }}
+QLabel#section {{ font-family: 'Segoe UI'; font-size: 12px; font-weight: bold; color: {C['text_secondary']}; }}
+QLabel#tileDesc {{ font-family: 'Segoe UI'; font-size: 10px; color: {C['text_muted']}; }}
+
+QFrame#results {{
+    background: {C['bg_card']};
+    border: 1px solid {C['accent_primary']};
+    border-radius: 10px;
+}}
+QFrame#results QLabel {{ background: transparent; }}
+QFrame#resultRow {{
+    background: {C['bg_input']};
+    border: 1px solid {C['border']};
+}}
+QFrame#resultRow[active="true"] {{ border-color: {C['accent_primary']}; }}
+
+QPushButton[role="heart"] {{
+    background: transparent; border: none; border-radius: 6px;
+    font-family: 'Segoe UI Symbol'; font-size: 21px;
+    min-height: 26px; max-height: 26px; min-width: 30px; max-width: 30px; padding: 0;
+    color: {C['text_muted']};
+}}
+QPushButton[role="heart"][on="true"] {{ color: {C['accent_primary']}; }}
+QPushButton[role="heart"]:hover {{ background: {C['bg_card']}; }}
+
+QFrame#searchBox {{
+    background: {C['bg_input']};
+    border: 1px solid {C['border']};
+    border-radius: 8px;
+}}
+QFrame#searchBox[focus="true"] {{ border-color: {C['accent_primary']}; }}
+QFrame#searchBox QLineEdit {{
+    background: transparent; border: none; padding: 2px 2px;
+    {_px('body_small')}
+}}
+QLineEdit {{
+    background: {C['bg_input']}; border: 1px solid {C['border']}; border-radius: 8px; padding: 3px 6px;
+    selection-background-color: {C['accent_primary']};
+}}
+
+QComboBox {{
+    background: {C['bg_input']};
+    border: 1px solid {C['border']};
+    border-radius: 8px;
+    padding: 3px 30px 3px 8px;
+    min-height: 22px;
+}}
+QComboBox[onCard="true"] {{ background: {C['bg_card']}; }}
+QComboBox:hover {{ border-color: {C['accent_primary']}; }}
+QComboBox::drop-down {{
+    subcontrol-origin: padding; subcontrol-position: center right;
+    width: 24px; border: none;
+    background: {C['accent_primary']};
+    border-top-right-radius: 7px; border-bottom-right-radius: 7px;
+}}
+QComboBox::drop-down:hover {{ background: {C['accent_secondary']}; }}
+QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 6px; }}
+QComboBox QAbstractItemView {{
+    background: {C['bg_card']};
+    border: 1px solid {C['border']};
+    selection-background-color: {C['accent_primary']};
+    selection-color: #FFFFFF;
+    outline: none;
+    padding: 2px;
+}}
+
 QMenu {{
     background: {C['bg_card']};
     border: 1px solid {C['border']};
@@ -258,6 +357,29 @@ def label(text="", *, muted=False, secondary=False, small=False):
     if small:
         lab.setProperty("small", True)
     return lab
+
+
+def inset():
+    """A bg_input box with a border inside a card; returns (frame, layout)."""
+    frame = QFrame()
+    frame.setObjectName("inset")
+    lay = QVBoxLayout(frame)
+    lay.setContentsMargins(10, 8, 10, 8)
+    lay.setSpacing(6)
+    return frame, lay
+
+
+def section_label(text):
+    lab = QLabel(text)
+    lab.setObjectName("section")
+    return lab
+
+
+def separator():
+    line = QFrame()
+    line.setObjectName("separator")
+    line.setFixedHeight(1)
+    return line
 
 
 def set_color(widget, color):

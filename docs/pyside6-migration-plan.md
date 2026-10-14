@@ -3,8 +3,8 @@
 Move the Adits Voice Studio UI from CustomTkinter to PySide6 (Qt 6), one phase
 at a time, with the app usable after every phase.
 
-Status, 2026-10-14: Phases 0 and 1 committed on branch `qt-migration`.
-Phase 2 built and tested (not committed); go / no-go decision pending.
+Status, 2026-10-14: Phases 0, 1 and 2 committed on branch `qt-migration`.
+Phase 3 built and tested (not committed). Next: Phase 4.
 
 ---
 
@@ -216,6 +216,54 @@ the CTk version does not, stop here. Phase 1 still paid for itself.
 **Done when:** every engine, effect and customization item on the parity
 checklist works in the Qt UI, and settings saved by CTk (favourites, voice
 profiles) load unchanged.
+
+**Result (2026-10-14):**
+
+* Built: `ui_qt/panels/engine_panel.py`, `customization_panel.py`,
+  `effects_panel.py`; `ToggleSwitch`, `ValueSlider` and `ElidedLabel` in
+  `ui_qt/widgets.py`; style rules for dropdowns, tiles, the search box and
+  the Results overlay. The placeholder column is gone; Generate reads the
+  real panels.
+* `core/voice_selection.py`: the engine panel's selection rules (engine
+  kind, speed ranges and labels, `synthesis_key`, resolving a cloned voice's
+  base voice, `settings_for_selection`) moved out of the CTk panel, which
+  now calls them under the same method names. Recorded before and after the
+  move on 16 cases (valid, missing and out-of-range engines, voices and
+  speeds for all six engines): identical output.
+* Effects state: one on/off value per key in the panel; every switch that
+  shows a key (tile, Favourites mirror, search row) is redrawn from it. This
+  replaces the CTk panel's shared `BooleanVar`.
+* Fixed in the Qt panel, kept in CTk: choosing "Custom File..." again after
+  a built-in ambiance reloads the imported file.
+* Checked by driving the real window (favourites pointed at a temp file so
+  the user's `favourites.json` was not touched):
+  - Engine panel starts equal to `core.defaults`; each engine shows only its
+    own options box. `apply_voice_selection()` and `settings_for_selection()`
+    give the same settings, errors and speed labels as the CTk panel on the
+    same 16 cases.
+  - Customization starts equal to `core.defaults`; EQ sliders show only
+    when on; Airplane Cabin generates, enables the player, hides Import and
+    plays on channel 1; Custom after built-in reloads the file; Remove
+    returns to None.
+  - Effects: 168 tiles here (34 effects, 134 cloned voices), only Normalize
+    on. Heart adds a mirror and writes `{"keys": ["robotic"]}`; mirror and
+    tile switch together. Search "robot" gives 3 results ranked as in CTk,
+    Enter toggles, ↓↓ moves to row 3, Esc closes; "e" shows 8 of 168 with
+    the overflow note; no match shows the note. Two fake cloned voices act
+    as one exclusive group and notify subscribers (on, switch, and None
+    when removed).
+  - Generate with Piper, Robotic, EQ bass +6 dB, Skip Silences and
+    sentence subtitles: the status went through Robotic, equalizer and
+    subtitles; Whisper read the audio back word for word and the SRT has two
+    sentence cues.
+* Not checked yet: dropdown popups and the ambiance file dialog by hand,
+  and ambiance pausing while speech plays (wired as in CTk, not observed).
+* Not in the Qt UI until Phase 4: the Clone Voice group, so switching a
+  cloned voice on does not yet apply its base voice to TTS Engine, and its
+  sound sliders use the voice's saved values. ✏️ explains this and points
+  to the classic window.
+* Cosmetic: at 1100 px the engine dropdown cuts a long engine name; the
+  CTk dropdown does the same.
 
 ### Phase 4. Clone Voice and its dialogs (rough guess: 7 to 10 days)
 

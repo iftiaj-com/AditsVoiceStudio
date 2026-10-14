@@ -3,8 +3,140 @@ ui_qt/widgets.py
 ────────────────
 Small widgets shared by the Qt panels.
 """
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QMessageBox, QSlider, QStyle, QStyleOptionSlider
+from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtWidgets import (QAbstractButton, QLabel, QMessageBox, QSizePolicy, QSlider, QStyle,
+                               QStyleOptionSlider)
+
+from core.constants import COLORS
+
+
+class ToggleSwitch(QAbstractButton):
+    """An on/off switch drawn like CustomTkinter's CTkSwitch: a rounded track,
+    a round knob, and the text to its right (cut with "…" when it does not fit).
+
+    on_color: the track color when on (CTk uses switch_on for effect tiles and
+    the success green for option switches). Emits toggled(bool) like a QCheckBox.
+    """
+    TRACK_W, TRACK_H, GAP = 36, 18, 10
+
+    def __init__(self, text="", checked=False, on_color=None, parent=None):
+        super().__init__(parent)
+        self.setText(text)
+        self.setCheckable(True)
+        self.setChecked(checked)
+        self.setCursor(Qt.PointingHandCursor)
+        self._on = QColor(on_color or COLORS["switch_on"])
+        self._off = QColor(COLORS["switch_off"])
+        self._knob = QColor(COLORS["accent_primary"])
+        self._knob_hover = QColor(COLORS["accent_secondary"])
+        self._text_color = QColor(COLORS["text_primary"])
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+    def set_text_color(self, color):
+        self._text_color = QColor(color)
+        self.update()
+
+    def sizeHint(self):
+        fm = QFontMetrics(self.font())
+        text_w = fm.horizontalAdvance(self.text()) + self.GAP if self.text() else 0
+        return QSize(self.TRACK_W + text_w + 2, max(self.TRACK_H + 6, fm.height() + 4))
+
+    def minimumSizeHint(self):
+        return QSize(self.TRACK_W + 2, self.TRACK_H + 6)
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        h, w = self.TRACK_H, self.TRACK_W
+        y = (self.height() - h) / 2
+        enabled = self.isEnabled()
+        track = self._on if self.isChecked() else self._off
+        if not enabled:
+            track = track.darker(160)
+        p.setPen(Qt.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(QRectF(0, y, w, h), h / 2, h / 2)
+        k = 2
+        x0 = w - h if self.isChecked() else 0
+        knob = self._knob_hover if (self.underMouse() and enabled) else self._knob
+        p.setBrush(knob if enabled else knob.darker(160))
+        p.drawEllipse(QRectF(x0 + k, y + k, h - 2 * k, h - 2 * k))
+        if self.text():
+            p.setPen(self._text_color if enabled else QColor(COLORS["text_muted"]))
+            p.setFont(self.font())
+            left = w + self.GAP
+            fm = QFontMetrics(self.font())
+            text = fm.elidedText(self.text(), Qt.ElideRight, max(0, self.width() - left))
+            p.drawText(QRectF(left, 0, self.width() - left, self.height()),
+                       Qt.AlignVCenter | Qt.AlignLeft, text)
+
+    def enterEvent(self, e):
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.update()
+        super().leaveEvent(e)
+
+
+class ValueSlider(QSlider):
+    """A horizontal slider over a float range (QSlider only knows ints).
+
+    step: the smallest change (0.01 for speeds, 1 for whole numbers).
+    valueChangedF(float) fires while it moves, like the CTk slider's command.
+    """
+    valueChangedF = Signal(float)
+
+    def __init__(self, lo, hi, value, step=0.01, width=None, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self._lo, self._step = float(lo), float(step)
+        self.setRange(0, int(round((hi - lo) / step)))
+        self.set_value(value)
+        self.setCursor(Qt.PointingHandCursor)
+        if width:
+            self.setFixedWidth(width)
+        self.valueChanged.connect(lambda _v: self.valueChangedF.emit(self.value_f()))
+
+    def value_f(self) -> float:
+        v = self._lo + self.value() * self._step
+        return float(round(v)) if self._step >= 1 else round(v, 6)
+
+    def set_value(self, v, emit=False):
+        """Move the handle to v (clamped); emit=False keeps valueChangedF quiet."""
+        self.blockSignals(not emit)
+        self.setValue(int(round((float(v) - self._lo) / self._step)))
+        self.blockSignals(False)
+
+
+class ElidedLabel(QLabel):
+    """A one-line label that cuts its text with "…" at the end instead of
+    widening its column (CTk descriptions clip at the end, anchor "w")."""
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._full = text
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        self._full = text
+        self.setToolTip(text if text else "")
+        self._elide()
+
+    def full_text(self):
+        return self._full
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self):
+        fm = QFontMetrics(self.font())
+        super().setText(fm.elidedText(self._full, Qt.ElideRight, max(10, self.contentsRect().width())))
 
 
 class SeekSlider(QSlider):

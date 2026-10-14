@@ -25,6 +25,7 @@ or fixes it.
   built-in sound, then back to "Custom File...". The label shows the file
   name, but the built-in sound stays loaded, because `_amb_sound` is already
   set. (`ui/panels/customization_panel.py:312-313`, `:385`)
+  **Qt port: fixed** (reloads the file; `ui_qt/panels/customization_panel.py`).
 - [ ] **↶ / ↷ during a transcription**: the undo and redo buttons are not
   blocked by `_editable()` while Whisper writes into the box.
   (`ui/panels/text_panel.py:213-216`)
@@ -42,6 +43,7 @@ or fixes it.
 - [ ] **Playback row clips text** at narrow widths ("Cance", "Folde"): six
   buttons share fixed column ratios with no minimum width.
   (`ui/panels/playback_panel.py:130-176`)
+  **Qt port: fixed** (two rows of three when one row does not fit).
 
 ---
 
