@@ -3,8 +3,9 @@
 Move the Adits Voice Studio UI from CustomTkinter to PySide6 (Qt 6), one phase
 at a time, with the app usable after every phase.
 
-Status, 2026-10-14: Phases 0 to 5 committed on branch `qt-migration`.
-Next: Phase 6.
+Status, 2026-10-14: Phases 0 to 5 and the first step of phase 6 (Qt is the
+default window) committed on branch `qt-migration`. Left: removing the
+classic window after one release on Qt.
 
 ---
 
@@ -381,6 +382,26 @@ passes and whose window opens at 100%, 125% and 150% scaling.
   `requirements.txt`, and the fallback flag. Rename `ui_qt/` to `ui/`.
 
 **Done when:** one release has shipped on Qt with no fallback use needed.
+
+**Result, first step (2026-10-14):**
+
+* `tts_app.py`: the Qt window is the default. `--ui ctk`, `--ui=ctk` or
+  `ADITS_UI=ctk` start the classic window; `--qt` is still accepted and
+  changes nothing.
+* Checked from source by launching each and reading the window class:
+  default and `--qt` gave a Qt window (`Qt6112QWindowIcon`), `--ui ctk` and
+  `ADITS_UI=ctk` a Tk one (`TkTopLevel`), each in about 25 s. The first
+  default launch after the 37-minute build showed no window within 80 s and
+  was stopped while still running; the retry opened in 25 s. Likely a cold
+  start, not confirmed.
+* The installed app and its shortcuts start the EXE with no arguments, so a
+  build made from this commit opens the Qt window. (The phase 5 build in
+  `dist/` was made before this change and still opens the classic window.)
+* Second step, not done: after one release on Qt, delete `ui/`, the
+  `customtkinter` requirement and `_REQUIRED` / `--collect-all` entries in
+  `build_exe.py`, the fallback flag, and rename `ui_qt/` to `ui/`. Two files
+  in `ui/panels/` hold uncommitted edits (search box, footer buttons) that
+  are already ported to `ui_qt/`; commit or drop them first.
 
 ---
 

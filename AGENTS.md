@@ -95,7 +95,7 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `    ├── record_dialog.py` | GUI Widget | Microphone recorder for clone clips: device picker, level meter, live waveform, preview with seek, Add to clips. |
 | `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
-| **`ui_qt/`** | Directory | The PySide6 UI being built next to `ui/` (see `docs/pyside6-migration-plan.md`). Started with `tts_app.py --qt` or `ADITS_UI=qt`; `ui/` stays the default until it is done. Has the main window, every panel, the Clone Voice group and its four dialogs. |
+| **`ui_qt/`** | Directory | The PySide6 window, the default since migration phase 6 (see `docs/pyside6-migration-plan.md`). The classic CustomTkinter window in `ui/` stays for one release as a fallback: `tts_app.py --ui ctk` or `ADITS_UI=ctk`. Has the main window, every panel, the Clone Voice group and its four dialogs. |
 | `├── app.py` | Qt Main Window | `MainWindow` and `run()`: header, fixed 50/50 columns, status bar, and the generation, playback and save flow through `core.pipeline`. The right column is a placeholder until the engine, customization and effects panels are ported. |
 | `├── theme.py` | Qt Look | One style sheet from `COLORS` / `FONTS` (font sizes as px, like CTk). Buttons get their look from the `role` property. `icon_font()` sets a font the sheet cannot override. |
 | `├── bridge.py` | Thread Bridge | `ui(fn, *args)` runs a call on the GUI thread through a queued signal, the Qt counterpart of `after(0, ...)`. Workers must never touch a widget directly. |
@@ -774,10 +774,12 @@ To launch the application from source code:
    ```powershell
    .\run.ps1
    ```
-4. The Qt window (PySide6, being built to replace the CustomTkinter one; see
-   `docs/pyside6-migration-plan.md`) starts with `--qt`, or with `ADITS_UI=qt`:
+4. The window is the Qt one (PySide6). For one release the classic
+   CustomTkinter window is still there as a fallback (see
+   `docs/pyside6-migration-plan.md`, phase 6); `--qt` is still accepted and
+   changes nothing:
    ```powershell
-   .\venv_311\Scripts\python.exe tts_app.py --qt
+   .\venv_311\Scripts\python.exe tts_app.py --ui ctk
    ```
 
 ### Compiling to Portable EXE
@@ -797,7 +799,7 @@ You can package Adits Voice Studio into a standalone Windows directory:
    * prunes build-only files (`torch/lib/*.lib`, headers, C sources, pygame tests);
    * writes `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` and `licenses/` into the app folder;
    * bundles `vc_runtime/` (worker scripts and pinned requirements) as data, but no cloning libraries;
-   * bundles PySide6 next to CustomTkinter (both windows ship until the Qt one becomes the default), drops `PySide6/translations` (the app is English), and lists Qt / PySide6 under the LGPL-3.0 in the notices (their packages ship only Qt's commercial license file, which the notice generator skips);
+   * bundles PySide6 next to CustomTkinter (the Qt window is the default; the classic one ships for one more release as a fallback, `--ui ctk`), drops `PySide6/translations` (the app is English), and lists Qt / PySide6 under the LGPL-3.0 in the notices (their packages ship only Qt's commercial license file, which the notice generator skips);
    * runs `AditsVoiceStudio.exe --selftest` and stops if any offline engine produces no audio, or if the Qt window cannot be built (`qt_window` builds the real window on the Windows platform plugin without showing it, which catches a missing `qwindows.dll`).
 3. Once completed, the distribution is saved in the `./dist/AditsVoiceStudio/` folder (dominated by the CUDA build of PyTorch). Run `AditsVoiceStudio.exe` to launch the portable app.
 
