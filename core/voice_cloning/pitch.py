@@ -43,6 +43,9 @@ def voiced_f0(path, max_seconds=30.0):
     y = _load_mono_16k(path, max_seconds)
     if y.size < _SR // 2:
         return np.array([], dtype=np.float32)
+    # Keep pYIN's default hop (256). Hop 512 took half the time (2.0 s against
+    # 4.0 s for 25 s) but moved the share of frames at the floor (voicematch's
+    # F0_FLOOR_SHARE test) from 0.32 to 0.29 on one clip, flipping Auto's gender.
     f0, voiced, _ = librosa.pyin(y, fmin=FMIN, fmax=FMAX, sr=_SR, frame_length=1024)
     f0 = f0[voiced & ~np.isnan(f0)]
     return f0.astype(np.float32)

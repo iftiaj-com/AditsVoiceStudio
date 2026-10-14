@@ -309,6 +309,12 @@ QPushButton#amClose:hover {{ background: {c['border']}; }}
         def work():
             from core.voice_cloning import get_client
             client = get_client()
+            if not self.clean:
+                # Load Seed-VC while the bank and clip are prepared; it does the
+                # voiceprints and the cloning. Not with music removal on: that
+                # runs on the RVC worker, which would stop this one again.
+                threading.Thread(target=client.prestart, args=("seedvc",), daemon=True,
+                                 name="seedvc-prestart").start()
             cands = voicematch.candidates(engine_names, system_voices)
             self._cands = {c["id"]: c for c in cands}
             bank = voicematch.load_bank()

@@ -551,6 +551,13 @@ then created from the same clips, clean-up switches and base voice
 (`_usable_match()`, which compares `EnginePanel.synthesis_key()`), the first
 10 s of that Result become its saved preview (see Saved previews).
 
+Speed (2026-10-15): the Seed-VC convert worker starts on a thread when the run
+begins (`VCClient.prestart()`, skipped with music removal on, since that
+runs on the RVC worker), and `analyze_clip()` gets the voiceprint on a thread
+while pitch and Whisper run. `BLJ Voice over.mp3`, bank built: 212 s -> 134 s,
+same shortlist. pYIN keeps its default hop: hop 512 halved the pitch step but
+flipped Auto's gender on that clip (floor share 0.32 -> 0.29, threshold 0.30).
+
 Measured on the Arjun clip with the older test-clone ranking (bank already
 built): about 2.3 minutes per run; test-clone scores were 0.88 to 0.91 against
 0.60 to 0.70 before cloning. Seed-VC is not deterministic, so near-equal

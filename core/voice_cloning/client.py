@@ -259,6 +259,16 @@ class VCClient:
         raise VCWorkerError("generic", f"The {runtime.ENGINES[engine]['label']} worker kept being "
                                        "stopped by other jobs.", hint="Try again when other cloning jobs finish.")
 
+    def prestart(self, engine):
+        """Start the engine's convert worker now, with no request, so the first
+        request does not wait for its model to load (about 20 s for Seed-VC).
+        Blocks until the worker is started; call it on a thread. Errors are
+        left for the real request to report."""
+        try:
+            self._worker(engine, "convert")
+        except Exception:
+            pass
+
     def is_warm(self, engine) -> bool:
         """True when the engine's convert worker is running (no model-load wait)."""
         w = self._workers.get((engine, "convert"))     # no lock: called from the Tk thread

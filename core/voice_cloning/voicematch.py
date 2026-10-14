@@ -531,10 +531,22 @@ def analyze_clip(path, embed_fn, progress=None):
     f0_unsure: over F0_FLOOR_SHARE of the voiced frames sit at the tracker's
     floor; f0 is then the median of the frames above it.
     """
+    import threading
     from core.subtitles import get_whisper_model
     from core.voice_cloning import pitch as pitch_mod
     say = progress or (lambda f, m: None)
     import numpy as np
+    # The voiceprint comes from the Seed-VC worker, a separate process, so it
+    # runs while this thread measures pitch and Whisper transcribes.
+    emb_box = {}
+
+    def _embed():
+        try:
+            emb_box["emb"] = embed_fn(str(path))
+        except BaseException as e:      # re-raised below, on the caller's thread
+            emb_box["err"] = e
+    emb_thread = threading.Thread(target=_embed, daemon=True, name="voice-match-embed")
+    emb_thread.start()
     say(0.1, "Measuring pitch…")
     frames = pitch_mod.voiced_f0(str(path), max_seconds=45)
     f0, unsure = (float(np.median(frames)) if frames.size >= 20 else None), False
@@ -549,7 +561,10 @@ def analyze_clip(path, embed_fn, progress=None):
     text = " ".join(s.text.strip() for s in segments)
     lang = info.language
     say(0.75, "Measuring the voiceprint…")
-    emb = embed_fn(str(path))
+    emb_thread.join()
+    if "err" in emb_box:
+        raise emb_box["err"]
+    emb = emb_box.get("emb")
     return {"f0": f0, "f0_unsure": unsure, "gender": gender_guess(f0, unsure), "lang": lang,
             "lang_prob": round(float(info.language_probability or 0), 2),
             "rate": rate(text, lang, str(path)), "text": text, "emb": emb,
