@@ -10,9 +10,11 @@ This file is intentionally tiny. All logic lives in the packages below:
 
 Run with:
     python tts_app.py
+    python tts_app.py --qt                     (Qt UI in progress; or set ADITS_UI=qt)
     python tts_app.py --selftest report.json   (headless engine check)
 """
 
+import os
 import sys
 
 # Must run before ui.app imports torch / transformers / huggingface_hub,
@@ -64,10 +66,17 @@ if __name__ == "__main__":
         sys.exit(0)
 
     from core.temp_cleanup import sweep_orphan_temp_dirs
-    from ui.app import AditsVoiceStudioApp
 
     # Remove adits_vs_* temp dirs orphaned by a previous crash/force-quit.
     sweep_orphan_temp_dirs()
+
+    # The Qt UI is being built next to the CustomTkinter one
+    # (docs/pyside6-migration-plan.md); the CTk UI stays the default until it is done.
+    if "--qt" in sys.argv[1:] or os.environ.get("ADITS_UI", "").lower() == "qt":
+        from ui_qt.app import run
+        sys.exit(run(on_shown=_close_splash))
+
+    from ui.app import AditsVoiceStudioApp
     app = AditsVoiceStudioApp()
     _close_splash()
     app.mainloop()

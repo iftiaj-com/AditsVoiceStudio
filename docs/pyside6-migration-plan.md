@@ -3,8 +3,8 @@
 Move the Adits Voice Studio UI from CustomTkinter to PySide6 (Qt 6), one phase
 at a time, with the app usable after every phase.
 
-Status, 2026-10-14: Phase 1 and Phase 0 done on branch `qt-migration`.
-Next: Phase 2.
+Status, 2026-10-14: Phases 0 and 1 committed on branch `qt-migration`.
+Phase 2 built and tested (not committed); go / no-go decision pending.
 
 ---
 
@@ -152,6 +152,49 @@ and 125% / 150% Windows scaling show no overlap or black areas.
 
 **Go / no-go:** if the text panel or the threading model fights back in ways
 the CTk version does not, stop here. Phase 1 still paid for itself.
+
+**Result (2026-10-14):**
+
+* Built: `ui_qt/` (`app.py`, `theme.py`, `bridge.py`, `widgets.py`,
+  `panels/playback_panel.py`, `panels/text_panel.py`), `core/defaults.py`
+  (the panels' starting settings, used for Generate until Phase 3), and
+  `core.pipeline.snippet_of()` (Preview's first-sentence rule, now shared).
+  `tts_app.py --qt` or `ADITS_UI=qt` starts it; the CTk UI stays the default.
+* Live dictation text, decided: the phrase in progress shows as a gray line
+  under the box, not inside it. Qt clears the undo history when undo is
+  switched off, which the CTk approach relies on. Finished phrases go into the
+  box as one undo step each, as before.
+* Transcription stays one undo step: the first change opens an edit block
+  and each segment joins it (`QTextCursor.joinPreviousEditBlock`). Revert
+  undoes only when the transcription itself added an undo step.
+* Playback row: each button's minimum width fits its longest text. When the
+  card is narrower than all six need, the row becomes two rows of three. At
+  1180x680 and 1100x600 (125% scaling) it shows as two rows; no text is
+  clipped and no buttons overlap.
+* Checked by driving the real window (script, not by hand):
+  - Footer edits: Paste over the sample replaces it, Paste over own text
+    appends after a blank line, Clear, Paste & Replace; each is one undo
+    step, and two undos return to the sample with ↶ greyed out.
+  - put_text over own text with Append, then one undo restores it.
+  - Dictation fed from a recorded WAV through `Dictation(source=...)`: state
+    label went Loading → Hearing you → Writing → Listening; the gray line
+    showed partials ("Phase.", "Phase one check.", ...); the final sentence
+    was written after "Start." and one undo removed it.
+  - Transcription of the same WAV, Append over own text: read-only during
+    the job, correct text and status, one undo restored the old text.
+    Media strip played (0:01 / 0:03 after 1.2 s), paused, closed.
+  - Generate with Kokoro (defaults): 3.0 s at 24 kHz, Whisper read it back
+    word for word. Play, progress, Stop and the "Playback stopped" status
+    as in the CTk app.
+  - `core.defaults` equals the CTk panels' `get_settings()` /
+    `get_active_effects()` right after start, key for key.
+  - `tts_app.py --qt` opened the window and closed with no process left.
+* Not checked yet: the file dialogs, the + menu popup and the Replace /
+  Append / Cancel box by hand (the test answered them in code), tooltips,
+  Esc and Ctrl+Z / Ctrl+Y from the keyboard, dictation from a real
+  microphone, the save dialogs and Folder, and 100% / 150% scaling.
+* Not in the Qt UI until Phase 3: ambiance pause during playback (there is
+  no ambiance control yet).
 
 ### Phase 3. Main panels (rough guess: 5 to 7 days)
 

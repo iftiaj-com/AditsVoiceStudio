@@ -48,6 +48,7 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `├── audio_io.py` | Audio I/O | MP3 encode and non-WAV decode through soundfile's libsndfile, so no ffmpeg is needed. |
 | `├── pipeline.py` | Generation Pipeline | `run(request, synth, tmp_dir, cancel_event, progress, status, warn)`: synthesize, skip silences, speed, voice effects, EQ, ambiance, normalize, subtitles, MP3. Takes a `GenerationRequest` of plain settings read on the UI thread and returns a `GenerationResult`; raises `Cancelled`. No UI imports. |
 | `├── synth.py` | Synthesizer | `Synthesizer` (`app.synth`): the engine map, `lock` (one `engine.synthesize()` at a time), `engine_kwargs()` and `synthesize(text, tmp_dir, eng_settings)`. Used by generation, the Clone Voice tools and the voice match. |
+| `├── defaults.py` | Starting Settings | `engine_settings()`, `customization_settings()`, `active_effects()`: the panels' `get_settings()` values right after start, as plain dicts. The Qt UI generates with them until it has those panels. Keep them equal to the CTk panels' starting values. |
 | `├── playback.py` | Playback | `Player`: plays the generated speech on `pygame.mixer.music`. No thread: the UI polls `is_playing()` / `fraction()` from a timer. |
 | `├── selftest.py` | Self-test | `AditsVoiceStudio.exe --selftest report.json` runs every offline engine headless and checks real output. |
 | `├── constants.py` | Configuration Module | Holds application-wide design tokens (colors, font configurations) and static lists of languages/voices. |
@@ -92,6 +93,13 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `    ├── record_dialog.py` | GUI Widget | Microphone recorder for clone clips: device picker, level meter, live waveform, preview with seek, Add to clips. |
 | `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
+| **`ui_qt/`** | Directory | The PySide6 UI being built next to `ui/` (see `docs/pyside6-migration-plan.md`). Started with `tts_app.py --qt` or `ADITS_UI=qt`; `ui/` stays the default until it is done. Has the main window, Text Input and Playback & Export so far. |
+| `├── app.py` | Qt Main Window | `MainWindow` and `run()`: header, fixed 50/50 columns, status bar, and the generation, playback and save flow through `core.pipeline`. The right column is a placeholder until the engine, customization and effects panels are ported. |
+| `├── theme.py` | Qt Look | One style sheet from `COLORS` / `FONTS` (font sizes as px, like CTk). Buttons get their look from the `role` property. `icon_font()` sets a font the sheet cannot override. |
+| `├── bridge.py` | Thread Bridge | `ui(fn, *args)` runs a call on the GUI thread through a queued signal, the Qt counterpart of `after(0, ...)`. Workers must never touch a widget directly. |
+| `├── widgets.py` | Shared Widgets | `SeekSlider` (milliseconds; a click on the groove jumps there) and `ask_choice()` (Replace / Append / Cancel style question). |
+| `└── panels/` | Directory | `text_panel.py` and `playback_panel.py`, ported from `ui/panels/` with the same behavior (`docs/ui-parity-checklist.md`). In `text_panel.py` the phrase being dictated shows in a gray line under the box, because Qt clears the undo history when undo is switched off. When the card is narrow, `playback_panel.py` puts its six buttons in two rows of three instead of clipping their text. |
+| **`docs/`** | Directory | `pyside6-migration-plan.md` (phases and results) and `ui-parity-checklist.md` (every control of the CTk UI, with possible bugs found). |
 | **`vc_runtime/`** | Directory | Code that runs **inside** the voice-cloning venvs and is never imported by the app: `worker.py`, `vc_common.py`, `rvc_backend.py`, `seedvc_backend.py`, `train_site/sitecustomize.py`, and the pinned `requirements-*.txt` / `.lock.txt`. |
 | **`vc_runtime_data/`** | Directory (gitignored) | The installed runtime when running from source: venvs, Applio and seed-vc clones, logs, and the voice library. |
 | **`models/`** | Directory | Storage for local model files (e.g. Piper `.onnx` files). |

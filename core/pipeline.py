@@ -10,6 +10,7 @@ same under any UI toolkit.
 """
 
 import os
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -20,6 +21,16 @@ from core.audio_io import load_segment, export_mp3
 from effects.audio_effects import AudioEffects
 from effects.registry import EFFECTS_REGISTRY
 from effects.cloned_voices import is_clone_entry, slug_of
+
+
+def snippet_of(text, max_chars=150):
+    """What ▶ Preview speaks: the first sentence of *text*, capped at *max_chars* on a word boundary."""
+    parts = re.split(r'(?<=[.!?])\s+', text, maxsplit=1)
+    snippet = parts[0] if parts else text
+    if len(snippet) > max_chars:
+        cut = snippet[:max_chars].rsplit(" ", 1)[0]
+        snippet = cut or snippet[:max_chars]
+    return snippet
 
 
 class Cancelled(Exception):

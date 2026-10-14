@@ -279,16 +279,6 @@ class AditsVoiceStudioApp(ctk.CTk):
         currently active voice + effects so the user can audition instantly."""
         self._start_generation(preview=True)
 
-    @staticmethod
-    def _snippet_of(text, max_chars=150):
-        """First sentence of *text*, capped at *max_chars* on a word boundary."""
-        parts = re.split(r'(?<=[.!?])\s+', text, maxsplit=1)
-        snippet = parts[0] if parts else text
-        if len(snippet) > max_chars:
-            cut = snippet[:max_chars].rsplit(" ", 1)[0]
-            snippet = cut or snippet[:max_chars]
-        return snippet
-
     def _start_generation(self, preview=False):
         if self._is_generating:
             return
@@ -297,7 +287,7 @@ class AditsVoiceStudioApp(ctk.CTk):
             self.set_status("⚠  Please enter some text first", COLORS["warning"])
             return
         if preview:
-            text = self._snippet_of(text)
+            text = pipeline.snippet_of(text)
 
         # Read every setting here, on the Tk thread. The worker gets plain
         # values and never touches a widget.
