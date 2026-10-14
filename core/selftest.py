@@ -11,6 +11,9 @@ broke espeak-ng on non-ASCII paths), and MP3 export must round-trip without
 ffmpeg. MeloTTS is only import-checked, because its first use downloads
 models; a network error there is reported as a warning, a missing module as
 a failure.
+
+The Qt window is built (not shown) and closed, so a Qt module or the Windows
+platform plugin missing from the bundle fails the build.
 """
 
 import json
@@ -124,6 +127,29 @@ def run(report_path):
     # Before melo: importing it re-downloads these into the bundle if missing.
     check("nltk_zips", _nltk_zips)
     check("melo_import", _melo)
+
+    def _qt_window():
+        # The Qt window (tts_app.py --qt) on the real Windows platform plugin,
+        # built but never shown: fails here if qwindows.dll or a Qt module is
+        # missing from the bundle, instead of on the user's first launch.
+        from PySide6.QtWidgets import QApplication
+        from ui_qt import bridge, theme
+        from ui_qt.app import MainWindow
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        app.setStyle("Fusion")
+        app.setStyleSheet(theme.stylesheet())
+        bridge.install()
+        win = MainWindow()
+        app.processEvents()
+        info = {"platform": app.platformName(), "title": win.windowTitle(),
+                "engines": win.engine_panel.engine_names(),
+                "effects": len(win._effects_panel.get_active_effects())}
+        win.close()
+        app.processEvents()
+        if info["platform"] != "windows" and sys.platform == "win32":
+            raise RuntimeError(f"Qt platform plugin is {info['platform']!r}, not 'windows'")
+        return info
+    check("qt_window", _qt_window)
 
     def _writable():
         out = {"logs": str(paths.logs_dir()), "output": str(paths.output_dir())}

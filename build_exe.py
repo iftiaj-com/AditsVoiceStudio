@@ -41,7 +41,8 @@ _REQUIRED = {
     "librosa":        "MeloTTS audio processing",
     "pyttsx3":        "pyttsx3 engine",
     "faster_whisper": "word-level subtitles",
-    "customtkinter":  "GUI",
+    "customtkinter":  "GUI (classic window, the default until the Qt one replaces it)",
+    "PySide6":        "Qt GUI (tts_app.py --qt; docs/pyside6-migration-plan.md)",
     "soundfile":      "audio I/O and MP3 export",
     "pyaudio":        "Clone Voice microphone recording",
     "av":             "Clone Voice clip import (M4A, AAC, WebM, WMA...)",
@@ -69,6 +70,7 @@ _PRUNE_GLOBS = [
 _PRUNE_DIRS = [
     "torch/include", "pygame/tests", "pygame/docs", "pygame/examples",
     "jieba/lac_small",          # needs paddle, which is not installed
+    "PySide6/translations",     # Qt's own UI strings in other languages; the app is English
 ]
 
 _WHISPER_REPO  = "Systran/faster-whisper-base"
@@ -248,6 +250,10 @@ def _write_notices():
         rows.append(f"  {name} {dist.version}\n      License: {lic}\n      {url}".rstrip())
         for f in dist.files or []:
             fn = Path(str(f)).name.upper()
+            # PySide6 / shiboken6 ship only Qt's commercial license file; this
+            # app uses Qt under the LGPL-3.0 (see NOTICES_HEADER.txt).
+            if fn == "LICENSEREF-QT-COMMERCIAL.TXT":
+                continue
             if ".dist-info" in str(f) and fn.startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS")):
                 try:
                     body = Path(f.locate()).read_text(encoding="utf-8", errors="replace")

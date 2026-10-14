@@ -77,7 +77,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self._sound = None
         self._playing = None          # (key, button, idle_text) of the clip being played
         try:
-            self._eng_settings = app._engine_panel.get_settings()
+            self._eng_settings = app.engine_panel.get_settings()
         except Exception:
             self._eng_settings = {}
 
@@ -200,14 +200,14 @@ class AnalyzerDialog(ctk.CTkToplevel):
         def work():
             from core.voice_cloning import get_client
             client = get_client()
-            cands = voicematch.candidates(list(self.app._engine_map), getattr(self.app, "_system_voices", []))
+            cands = voicematch.candidates(list(self.app.synth.engine_map), self.app.system_voices)
             self._cands = {c["id"]: c for c in cands}
             bank = voicematch.load_bank()
             if voicematch.needs_work(bank, cands):
                 todo = len(voicematch.missing(bank, cands))
                 self._ui(self._progress, 0.0, f"Updating the voice bank ({todo} voices)…" if todo
                          else "Updating the voice bank…")
-                bank = voicematch.build_bank(self.app, self._eng_settings, cands,
+                bank = voicematch.build_bank(self.app.synth, self._eng_settings, cands,
                                              progress=lambda f, m: self._ui(self._progress, 0.45 * f, m),
                                              check_cancel=self._check)
             self._check()
@@ -292,7 +292,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
                 self._ui(self._progress, 0.62 + 0.3 * i / n,
                          f"▶ Result {i + 1} of {n}: your clip's words in {m['label']}…")
                 src = os.path.join(self._tmp, f"transcript_{i}.wav")
-                voicematch.speak(self.app, self._eng_settings, cand, text, src, speed=m.get("speed"),
+                voicematch.speak(self.app.synth, self._eng_settings, cand, text, src, speed=m.get("speed"),
                                  check_cancel=self._check)
                 self._check()
                 self._ui(self._progress, 0.62 + 0.3 * (i + 0.4) / n,
@@ -382,13 +382,13 @@ class AnalyzerDialog(ctk.CTkToplevel):
         return b
 
     def _apply(self, m):
-        err = self.app._engine_panel.apply_voice_selection(m["selection"])
+        err = self.app.engine_panel.apply_voice_selection(m["selection"])
         if err:
             self._stage.configure(text=f"⚠  Could not apply: {err}", text_color=COLORS["warning"])
             return
         from ui.panels.engine_panel import EnginePanel
         desc = EnginePanel.describe_selection(m["selection"])
-        self.app._set_status(f"🔍  TTS Engine set to {desc} by voice match. Create the voice to keep it "
+        self.app.set_status(f"🔍  TTS Engine set to {desc} by voice match. Create the voice to keep it "
                              "as its base.", COLORS["success"])
         if self.on_applied:
             result = None

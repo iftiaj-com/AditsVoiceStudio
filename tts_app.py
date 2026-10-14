@@ -6,13 +6,16 @@ This file is intentionally tiny. All logic lives in the packages below:
   core/       – constants, design tokens, voice maps
   engines/    – TTS engine adapters + registry
   effects/    – audio DSP effects + registry
-  ui/         – panels, theme helpers, and the main app window
+  ui_qt/      – the window (PySide6): panels, theme, dialogs
+  ui/         – the classic CustomTkinter window, kept for one release as a fallback
 
 Run with:
     python tts_app.py
+    python tts_app.py --ui ctk                 (classic window; or set ADITS_UI=ctk)
     python tts_app.py --selftest report.json   (headless engine check)
 """
 
+import os
 import sys
 
 # Must run before ui.app imports torch / transformers / huggingface_hub,
@@ -64,10 +67,25 @@ if __name__ == "__main__":
         sys.exit(0)
 
     from core.temp_cleanup import sweep_orphan_temp_dirs
-    from ui.app import AditsVoiceStudioApp
 
     # Remove adits_vs_* temp dirs orphaned by a previous crash/force-quit.
     sweep_orphan_temp_dirs()
+
+    # The Qt window is the default. The classic CustomTkinter window stays for
+    # one release as a fallback (docs/pyside6-migration-plan.md, phase 6):
+    # `--ui ctk` or ADITS_UI=ctk. `--qt` is still accepted and changes nothing.
+    ui = os.environ.get("ADITS_UI", "").lower()
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--ui" and i + 1 < len(args):
+            ui = args[i + 1].lower()
+        elif a.startswith("--ui="):
+            ui = a.split("=", 1)[1].lower()
+    if ui != "ctk":
+        from ui_qt.app import run
+        sys.exit(run(on_shown=_close_splash))
+
+    from ui.app import AditsVoiceStudioApp
     app = AditsVoiceStudioApp()
     _close_splash()
     app.mainloop()
