@@ -1,5 +1,5 @@
 """
-ui_qt/bridge.py
+ui/bridge.py
 ───────────────
 Run a function on the Qt GUI thread from any thread.
 

@@ -1,52 +1,43 @@
 """
-ui/panels/effects_panel.py  –  Voice effects card
+ui/panels/effects_panel.py  –  Voice effects card (Qt)
 
-Three sub-sections inside one card:
+Same sections, rules and public methods as ui/panels/effects_panel.py
+(see docs/ui-parity-checklist.md, "Effects panel"):
 
   ♥ Favourites              a mirror tile for every effect whose heart is on
-  🧬 Cloned Voices  [✏]     tiles for entries with exclusive_group "clone",
-                            plus a pencil button that opens rename/delete
+  🧬 Cloned Voices  [✏]     entries with exclusive_group "clone"
   🎛 Effects                every other EFFECTS_REGISTRY entry
 
-Tiles are built from EFFECTS_REGISTRY and kept by key. Cloned voices can
-appear and disappear while the app runs, so sync() adds, removes, renames
-and re-grids tiles. Entries that share an "exclusive_group" act like radio
-buttons: switching one on switches the others in that group off.
+State: one on/off value per effect key (self._on). Every switch that shows a
+key (its tile, its Favourites mirror, a search result row) is listed in
+self._views[key] and redrawn from that value, which replaces the CTk panel's
+shared BooleanVar. A user click goes through _user_toggle(), which applies
+the exclusive-group rule only for keys that have a group, as the CTk tiles do.
 
-Every tile has a heart on the right of its switch. Filling it adds a mirror
-tile to Favourites; the mirror's switch shares the original's BooleanVar,
-so both always show the same state. Favourite keys are saved, in the order
-they were added, to <user>/settings/favourites.json.
-
-The search box on the title line looks through cloned voices and effects as
-the user types: every word must appear in a tile's name, description or
-section. Matches show as rows in a Results panel laid over the top of the
-card, names starting with the words first, at most MAX_RESULTS. Each row
-shares the effect's BooleanVar. Clicking a row switches it; ↑ / ↓ move the
-highlight, Enter switches the highlighted row, Esc clears the search.
-
-Speed (about 170 tiles, most of them cloned voices): hiding and re-showing
-the tiles themselves took 0.6 to 1.5 s, and a Results section in the layout
-moved every widget under it (0.4 to 1.2 s a keystroke). The overlay takes no
-room, and the rows are plain Tk widgets (_ResultRow), so a search only
-re-labels a few rows.
+Search: as in the CTk panel, matches show in a Results panel laid over the
+top of the tiles (it takes no room, so nothing below moves), at most
+MAX_RESULTS rows, ranked names-first. The favourites file is the same one
+the CTk panel uses.
 """
 import json
 import os
 import re
-import tkinter as tk
 
-import customtkinter as ctk
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
+                               QVBoxLayout, QWidget)
+
 from core import paths
-from core.constants import COLORS, FONTS
+from core.constants import COLORS
 from effects.registry import EFFECTS_REGISTRY
+from ui import icons, theme
+from ui.widgets import ElidedLabel, ToggleSwitch
 
 CLONE_GROUP = "clone"
 HEART_OFF, HEART_ON = "♡", "♥"
-HEART_FONT = ("Segoe UI Symbol", 21)
-SECTION_FONT = ("Segoe UI", 12, "bold")
 SEARCH_DELAY_MS = 120   # search once typing pauses
 MAX_RESULTS = 8         # rows in the Results panel
+NUM_COLS = 2            # the CTk panel is packed in the right column: 2 columns
 SEARCH_TIP = ("Search effects and cloned voices by name or description. Click a result, "
               "or press Enter, to switch it on or off. ↑ ↓ move, Esc clears.")
 
@@ -80,277 +71,274 @@ def save_favourites(keys) -> None:
         print(f"Could not save favourites: {e}")
 
 
-class _ResultRow:
-    """One search result: switch, name, description and heart in a single row.
+def _heart(on):
+    b = theme.button(HEART_ON if on else HEART_OFF, "heart")
+    b.setProperty("on", bool(on))
+    return b
 
-    Plain Tk widgets, not CTk: a CTk tile redraws its canvases on every
-    change (30 to 80 ms per tile here), a Tk label in about a millisecond.
-    Rows are kept and re-pointed at other effects as the search changes.
-    Clicking the row switches the effect; clicking the heart favourites it.
-    """
 
-    def __init__(self, parent, panel, index):
-        self.panel, self.index = panel, index
-        self.key = self._var = self._trace = None
-        s = parent._get_widget_scaling() if hasattr(parent, "_get_widget_scaling") else 1.0
-        self._s = s
-        px = lambda n: max(1, round(n * s))         # noqa: E731
-        self._pad = px(2)
-        bg = COLORS["bg_input"]
-        f = tk.Frame(parent, bg=bg, highlightthickness=1, highlightbackground=COLORS["border"],
-                     highlightcolor=COLORS["border"], cursor="hand2")
-        self.frame = f
-        self.pill = tk.Canvas(f, width=px(36), height=px(18), bg=bg, highlightthickness=0)
-        self.pill.pack(side="left", padx=(px(10), px(8)), pady=px(8))
-        self.name = tk.Label(f, bg=bg, fg=COLORS["text_primary"], anchor="w",
-                             font=(FONTS["body"][0], -px(FONTS["body"][1])))
-        self.name.pack(side="left")
-        self.heart = tk.Label(f, bg=bg, cursor="hand2", font=(HEART_FONT[0], -px(17)))
-        self.heart.pack(side="right", padx=(0, px(8)))
-        self.desc = tk.Label(f, bg=bg, fg=COLORS["text_muted"], anchor="w",
-                             font=("Segoe UI", -px(10)))
-        self.desc.pack(side="left", fill="x", expand=True, padx=(px(10), px(6)))
-        for w in (f, self.pill, self.name, self.desc):
-            w.bind("<Button-1>", lambda e: self.panel.toggle_effect(self.key))
-            w.bind("<Enter>", lambda e: self.panel._set_active(self.index))
-        self.heart.bind("<Button-1>", lambda e: self.panel.toggle_favourite(self.key))
-        self.heart.bind("<Enter>", lambda e: self.panel._set_active(self.index))
+def _paint_heart(btn, on):
+    btn.setText(HEART_ON if on else HEART_OFF)
+    if btn.property("on") != bool(on):
+        btn.setProperty("on", bool(on))
+        theme.repolish(btn)
 
-    def show(self, key, name, desc, var, favourite):
-        if key != self.key or var is not self._var:
-            self.unbind_var()
-            self.key, self._var = key, var
-            self._trace = var.trace_add("write", lambda *_: self.draw())
-        if self.name.cget("text") != name:
-            self.name.configure(text=name)
-        if self.desc.cget("text") != desc:
-            self.desc.configure(text=desc)
-        self.paint_heart(favourite)
-        self.draw()
-        if not self.frame.winfo_manager():
-            self.frame.pack(fill="x", padx=self._pad, pady=self._pad)
 
-    def hide(self):
-        self.unbind_var()
-        if self.frame.winfo_manager():
-            self.frame.pack_forget()
+class _Tile(QFrame):
+    """One effect: switch and heart on the first line, description below."""
 
-    def unbind_var(self):
-        if self._var is not None and self._trace is not None:
-            try:
-                self._var.trace_remove("write", self._trace)
-            except Exception:
-                pass
-        self.key = self._var = self._trace = None
+    def __init__(self, panel, key, label, desc, on):
+        super().__init__()
+        self.setObjectName("tile")
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)   # equal columns, like CTk "uniform"
+        g = QGridLayout(self)
+        g.setContentsMargins(10, 6, 6, 6)
+        g.setHorizontalSpacing(4)
+        g.setVerticalSpacing(0)
+        g.setColumnStretch(0, 1)
+        self.switch = ToggleSwitch(label, on, icon=icons.effect_icon(key))
+        self.switch.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.switch.clicked.connect(lambda checked: panel._user_toggle(key, checked))
+        g.addWidget(self.switch, 0, 0)
+        self.heart = _heart(key in panel._fav_keys)
+        self.heart.clicked.connect(lambda: panel.toggle_favourite(key))
+        g.addWidget(self.heart, 0, 1)
+        self.desc = ElidedLabel(desc)
+        self.desc.setObjectName("tileDesc")
+        g.addWidget(self.desc, 1, 0, 1, 2)
+        self.desc.setContentsMargins(46, 0, 0, 0)      # under the switch's text, like CTk padx=42
+
+
+class _ResultRow(QFrame):
+    """One search result: switch, name, description and heart. Clicking the
+    row switches the effect; clicking the heart favourites it."""
+
+    def __init__(self, panel, index):
+        super().__init__()
+        self.panel, self.index, self.key = panel, index, None
+        self.setObjectName("resultRow")
+        self.setCursor(Qt.PointingHandCursor)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(10, 4, 8, 4)
+        h.setSpacing(8)
+        self.switch = ToggleSwitch("")
+        self.switch.setFixedWidth(ToggleSwitch.TRACK_W + 2)
+        self.switch.setAttribute(Qt.WA_TransparentForMouseEvents)   # the whole row is the button
+        h.addWidget(self.switch)
+        self.name = theme.label("")
+        h.addWidget(self.name)
+        self.desc = ElidedLabel("")
+        self.desc.setObjectName("tileDesc")
+        h.addWidget(self.desc, 1)
+        self.heart = _heart(False)
+        self.heart.clicked.connect(lambda: self.key and panel.toggle_favourite(self.key))
+        h.addWidget(self.heart)
+
+    def show_key(self, key, name, desc, on, favourite):
+        self.key = key
+        self.name.setText(name)
+        self.name.set_icon_name(icons.effect_icon(key))
+        self.desc.setText(desc)
+        self.switch.setChecked(on)
+        _paint_heart(self.heart, favourite)
+        self.show()
 
     def set_active(self, on):
-        color = COLORS["accent_primary"] if on else COLORS["border"]
-        self.frame.configure(highlightbackground=color, highlightcolor=color)
+        if self.property("active") != bool(on):
+            self.setProperty("active", bool(on))
+            theme.repolish(self)
 
-    def paint_heart(self, favourite):
-        self.heart.configure(text=HEART_ON if favourite else HEART_OFF,
-                             fg=COLORS["accent_primary"] if favourite else COLORS["text_muted"])
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.key:
+            self.panel.toggle_effect(self.key)
 
-    def draw(self):
-        """The switch, drawn like the CTk ones: a track and a round knob."""
-        c, s = self.pill, self._s
-        on = bool(self._var.get()) if self._var is not None else False
-        w, h = round(36 * s), round(18 * s)
-        c.delete("all")
-        track = COLORS["switch_on"] if on else COLORS["switch_off"]
-        c.create_oval(0, 0, h, h, fill=track, outline=track)
-        c.create_oval(w - h, 0, w, h, fill=track, outline=track)
-        c.create_rectangle(h / 2, 0, w - h / 2, h, fill=track, outline=track)
-        k = round(2 * s)
-        x0 = w - h if on else 0
-        knob = COLORS["accent_primary"]
-        c.create_oval(x0 + k, k, x0 + h - k, h - k, fill=knob, outline=knob)
+    def enterEvent(self, e):
+        self.panel._set_active(self.index)
+        super().enterEvent(e)
 
+
+class _KeyFilter(QObject):
+    """Keys in the search box: Enter, ↑, ↓, Esc; and the box's focus border."""
+
+    def __init__(self, panel):
+        super().__init__()
+        self.p = panel
+
+    def eventFilter(self, obj, e):
+        t = e.type()
+        if t == QEvent.KeyPress:
+            k = e.key()
+            if k in (Qt.Key_Return, Qt.Key_Enter):
+                self.p._toggle_active()
+                return True
+            if k == Qt.Key_Down:
+                self.p._move_active(1)
+                return True
+            if k == Qt.Key_Up:
+                self.p._move_active(-1)
+                return True
+            if k == Qt.Key_Escape:
+                self.p.clear_search()
+                return True
+        elif t in (QEvent.FocusIn, QEvent.FocusOut):
+            box = self.p._search_box
+            box.setProperty("focus", t == QEvent.FocusIn)
+            theme.repolish(box)
+        elif t == QEvent.Resize and obj is self.p._body:
+            self.p._place_results()
+        return False
 
 
 class EffectsPanel:
-    def __init__(self, parent, row=None, on_edit_clones=None):
+    def __init__(self, on_edit_clones=None):
         self.on_edit_clones = on_edit_clones
-        frame = ctk.CTkFrame(
-            parent, fg_color=COLORS["bg_card"],
-            corner_radius=14, border_width=1, border_color=COLORS["border"]
-        )
-        if row is not None:
-            frame.grid(row=row, column=0, sticky="ew", padx=24, pady=6)
-            num_cols = 4
-        else:
-            frame.pack(fill="x", padx=16, pady=6)
-            num_cols = 2
+        self.frame, lay = theme.card()
 
-        # Title line: title on the left, search on the right.
-        head = ctk.CTkFrame(frame, fg_color="transparent")
-        head.pack(fill="x", padx=16, pady=(14, 10))
-        ctk.CTkLabel(
-            head, text="✨  Voice Effects",
-            font=FONTS["subtitle"],
-            text_color=COLORS["text_primary"],
-        ).pack(side="left")
+        # Title line: title on the left, result count and search on the right.
+        head = QHBoxLayout()
+        title = theme.label("✨  Voice Effects")
+        title.setObjectName("cardTitle")
+        head.addWidget(title)
+        head.addStretch(1)
+        self._filter = _KeyFilter(self)
         self._build_search(head)
+        lay.addLayout(head)
 
-        body = ctk.CTkFrame(frame, fg_color="transparent")
-        body.pack(fill="x", padx=16, pady=(0, 14))
-        self._num_cols = num_cols
+        self._body = QWidget()
+        body_l = QVBoxLayout(self._body)
+        body_l.setContentsMargins(0, 0, 0, 0)
+        body_l.setSpacing(4)
+        lay.addWidget(self._body)
+        self._body.installEventFilter(self._filter)
 
-        def section(sep=True):
-            sec = ctk.CTkFrame(body, fg_color="transparent")
-            sec.pack(fill="x")
-            if sep:
-                ctk.CTkFrame(sec, height=1, fg_color=COLORS["border"]).pack(fill="x", padx=4, pady=(10, 8))
-            return sec
+        # Favourites
+        body_l.addWidget(theme.section_label("♥  Favourites"))
+        self._fav_grid = self._grid(body_l)
+        self._fav_empty = theme.label(f"Click {HEART_OFF} on any effect or cloned voice to keep it here.",
+                                      muted=True, small=True)
+        # Cloned Voices
+        body_l.addSpacing(6)
+        body_l.addWidget(theme.separator())
+        body_l.addSpacing(4)
+        clone_head = QHBoxLayout()
+        clone_head.addWidget(theme.section_label("🧬  Cloned Voices"))
+        clone_head.addStretch(1)
+        self._edit_btn = theme.button("✏️", theme.ROLE_ICON)
+        self._edit_btn.clicked.connect(self._on_edit_clicked)
+        clone_head.addWidget(self._edit_btn)
+        body_l.addLayout(clone_head)
+        self._clone_grid = self._grid(body_l)
+        self._clone_empty = theme.label("No cloned voices yet. Create one in Customization → Clone Voice.",
+                                        muted=True, small=True)
+        # Effects
+        body_l.addSpacing(6)
+        body_l.addWidget(theme.separator())
+        body_l.addSpacing(4)
+        body_l.addWidget(theme.section_label("🎛  Effects"))
+        self._fx_grid = self._grid(body_l)
 
-        # ── Results panel: placed over the top of the body while searching ──
-        # An overlay takes no room in the layout, so nothing below it moves.
-        # Moving the ~900 widgets under it cost 0.4 to 1.2 s per keystroke.
-        self._res_sec = ctk.CTkFrame(body, fg_color=COLORS["bg_card"], corner_radius=10,
-                                     border_width=1, border_color=COLORS["accent_primary"])
-        res_head = ctk.CTkFrame(self._res_sec, fg_color="transparent")
-        res_head.pack(fill="x", padx=12, pady=(10, 4))
-        ctk.CTkLabel(res_head, text="🔍  Results", font=SECTION_FONT,
-                     text_color=COLORS["text_secondary"]).pack(side="left")
-        ctk.CTkLabel(res_head, text="Click or Enter switches  ·  ↑ ↓ move  ·  Esc closes",
-                     font=FONTS["body_small"], text_color=COLORS["text_muted"]).pack(side="right")
-        self._res_list = ctk.CTkFrame(self._res_sec, fg_color="transparent")
-        self._res_list.pack(fill="x", padx=10, pady=(0, 10))
-        self._res_note = ctk.CTkLabel(self._res_sec, text="", font=FONTS["body_small"],
-                                      text_color=COLORS["text_muted"], anchor="w")
-        self._res_rows: list = []       # _ResultRow, reused between searches
-        self._res_by_key: dict = {}     # key -> row showing it now
-        self._active = 0                # highlighted row, switched by Enter
+        # Results overlay: a child of the body, not in its layout.
+        self._results = QFrame(self._body)
+        self._results.setObjectName("results")
+        rl = QVBoxLayout(self._results)
+        rl.setContentsMargins(10, 10, 10, 10)
+        rl.setSpacing(4)
+        rh = QHBoxLayout()
+        rh.addWidget(theme.section_label("🔍  Results"))
+        rh.addStretch(1)
+        rh.addWidget(theme.label("Click or Enter switches  ·  ↑ ↓ move  ·  Esc closes", muted=True, small=True))
+        rl.addLayout(rh)
+        self._res_list = QVBoxLayout()
+        self._res_list.setSpacing(2)
+        rl.addLayout(self._res_list)
+        self._res_note = theme.label("", muted=True, small=True)
+        rl.addWidget(self._res_note)
+        self._results.hide()
+        self._res_rows = []
+        self._res_by_key = {}
+        self._active = 0
 
-        # ── Favourites sub-section ─────────────────────────────────
-        self._fav_sec = section(sep=False)
-        ctk.CTkLabel(self._fav_sec, text="♥  Favourites", font=SECTION_FONT,
-                     text_color=COLORS["text_secondary"]).pack(anchor="w", padx=4, pady=(0, 4))
-        self._fav_grid = ctk.CTkFrame(self._fav_sec, fg_color="transparent")
-        self._fav_grid.pack(fill="x")
-        self._fav_grid.columnconfigure(tuple(range(num_cols)), weight=1, uniform="fav")
-        self._fav_empty = ctk.CTkLabel(
-            self._fav_grid, text=f"Click {HEART_OFF} on any effect or cloned voice to keep it here.",
-            font=FONTS["body_small"], text_color=COLORS["text_muted"], anchor="w")
-
-        # ── Cloned Voices sub-section ──────────────────────────────
-        self._clone_sec = section()
-        clone_head = ctk.CTkFrame(self._clone_sec, fg_color="transparent")
-        clone_head.pack(fill="x", padx=4, pady=(0, 4))
-        ctk.CTkLabel(clone_head, text="🧬  Cloned Voices", font=SECTION_FONT,
-                     text_color=COLORS["text_secondary"]).pack(side="left")
-        self._edit_btn = ctk.CTkButton(
-            clone_head, text="✏️", width=32, height=28, corner_radius=8,
-            font=("Segoe UI Emoji", 13), fg_color="transparent",
-            hover_color=COLORS["bg_input"], text_color=COLORS["text_secondary"],
-            border_width=1, border_color=COLORS["border"],
-            command=self._on_edit_clicked)
-        self._edit_btn.pack(side="right")
-        self._clone_grid = ctk.CTkFrame(self._clone_sec, fg_color="transparent")
-        self._clone_grid.pack(fill="x")
-        self._clone_grid.columnconfigure(tuple(range(num_cols)), weight=1, uniform="clone")
-        self._clone_empty = ctk.CTkLabel(
-            self._clone_grid,
-            text="No cloned voices yet. Create one in Customization → Clone Voice.",
-            font=FONTS["body_small"], text_color=COLORS["text_muted"], anchor="w")
-
-        # ── Effects sub-section ────────────────────────────────────
-        self._fx_sec = section()
-        ctk.CTkLabel(self._fx_sec, text="🎛  Effects", font=SECTION_FONT,
-                     text_color=COLORS["text_secondary"]).pack(anchor="w", padx=4, pady=(0, 4))
-        self._fx_grid = ctk.CTkFrame(self._fx_sec, fg_color="transparent")
-        self._fx_grid.pack(fill="x")
-        self._fx_grid.columnconfigure(tuple(range(num_cols)), weight=1)
-
-        self._vars: dict = {}
-        self._tiles: dict = {}
-        self._labels: dict = {}
-        self._descs: dict = {}          # key -> description, for search
-        self._groups: dict = {}         # key -> exclusive group name
-        self._subscribers: dict = {}    # group -> [callback(active_key | None)]
-        self._fav_keys = load_favourites()  # saved order; may name voices not loaded now
-        self._fav_tiles: dict = {}      # key -> mirror tile in Favourites
-        self._fav_labels: dict = {}     # key -> mirror switch
-        self._hearts: dict = {}         # key -> heart on the original tile
-        self._fav_hearts: dict = {}     # key -> heart on the mirror tile
-        self._fav_subscribers: list = []  # callback() after Favourites change
+        self._on = {}                   # key -> bool
+        self._views = {}                # key -> [ToggleSwitch] showing it
+        self._tiles = {}
+        self._labels = {}               # key -> label text
+        self._descs = {}
+        self._groups = {}               # key -> exclusive group name
+        self._subscribers = {}          # group -> [callback(active_key | None)]
+        self._fav_keys = load_favourites()
+        self._fav_tiles = {}
+        self._fav_subscribers = []
         for effect in EFFECTS_REGISTRY:
             self._add_tile(effect)
         self._regrid()
 
+    @staticmethod
+    def _grid(parent_layout):
+        holder = QWidget()
+        g = QGridLayout(holder)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setSpacing(8)
+        for c in range(NUM_COLS):
+            g.setColumnStretch(c, 1)
+        parent_layout.addWidget(holder)
+        return g
+
     # ── search ─────────────────────────────────────────────────────
     def _build_search(self, head):
-        """Search box on the right of the title line: 🔍, entry, ✖ (shown with text)."""
-        from ui.panels.clone_voice_group import _Tip   # lazy: that module imports this one
-        self._query = []                # words of the active search
-        self._search_job = None
-        box = ctk.CTkFrame(head, fg_color=COLORS["bg_input"], corner_radius=8,
-                           border_width=1, border_color=COLORS["border"])
-        box.pack(side="right")
-        self._search_box = box
-        ctk.CTkLabel(box, text="🔍", font=("Segoe UI Emoji", 11), width=20,
-                     text_color=COLORS["text_muted"]).pack(side="left", padx=(8, 0))
-        # no textvariable: CTkEntry shows no placeholder when it has one
-        entry = ctk.CTkEntry(box, width=190, height=28,
-                             border_width=0, fg_color=COLORS["bg_input"], font=FONTS["body_small"],
-                             text_color=COLORS["text_primary"],
-                             placeholder_text="Search effects and voices",
-                             placeholder_text_color=COLORS["text_muted"])
-        entry.pack(side="left", padx=(2, 0), pady=1)
-        self._search_entry = entry
-        self._search_clear = ctk.CTkButton(box, text="✖", width=24, height=24, corner_radius=6,
-                                           font=FONTS["body_small"], fg_color="transparent",
-                                           hover_color=COLORS["bg_card"],
-                                           text_color=COLORS["text_secondary"],
-                                           command=self.clear_search)
-        _Tip(entry, SEARCH_TIP)
-        _Tip(self._search_clear, "Clear the search (Esc).")
-        self._search_count = ctk.CTkLabel(head, text="", font=FONTS["body_small"],
-                                          text_color=COLORS["text_muted"])
-        self._search_count.pack(side="right", padx=(0, 10))
+        self._query = []
         self._typed = ""
-        entry.bind("<KeyRelease>", lambda e: self._on_typed(), add="+")
-        entry.bind("<Return>", lambda e: self._toggle_active())
-        entry.bind("<Down>", lambda e: self._move_active(1))
-        entry.bind("<Up>", lambda e: self._move_active(-1))
-        entry.bind("<Escape>", lambda e: self.clear_search())
-        entry.bind("<FocusIn>", lambda e: box.configure(border_color=COLORS["accent_primary"]), add="+")
-        entry.bind("<FocusOut>", lambda e: box.configure(border_color=COLORS["border"]), add="+")
+        self._search_timer = QTimer()
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(SEARCH_DELAY_MS)
+        self._search_timer.timeout.connect(self._apply_search)
+        self._search_count = theme.label("", muted=True, small=True)
+        head.addWidget(self._search_count)
+        head.addSpacing(6)
+        box = QFrame()
+        box.setObjectName("searchBox")
+        bl = QHBoxLayout(box)
+        bl.setContentsMargins(8, 1, 4, 1)
+        bl.setSpacing(2)
+        icon = QLabel()
+        icon.setPixmap(icons.pixmap("search", COLORS["text_muted"], 14))
+        bl.addWidget(icon)
+        self._search_entry = QLineEdit()
+        self._search_entry.setPlaceholderText("Search effects and voices")
+        self._search_entry.setFixedWidth(190)
+        self._search_entry.setToolTip(SEARCH_TIP)
+        self._search_entry.textChanged.connect(self._on_typed)
+        self._search_entry.installEventFilter(self._filter)
+        bl.addWidget(self._search_entry)
+        self._search_clear = theme.button("✖", theme.ROLE_ICON, "Clear the search (Esc).")
+        self._search_clear.setStyleSheet("border: none; min-height: 22px; max-height: 22px;")
+        self._search_clear.clicked.connect(self.clear_search)
+        self._search_clear.hide()
+        bl.addWidget(self._search_clear)
+        self._search_box = box
+        head.addWidget(box)
 
-    def _on_typed(self):
-        """Any key in the box; search again once the text changed and typing pauses."""
-        text = self._search_entry.get()     # "" while the placeholder shows
+    def _on_typed(self, text):
         if text == self._typed:
-            return                          # arrows, Enter, Shift...
+            return
         self._typed = text
-        has_text = bool(text)
-        if has_text != self._search_clear.winfo_ismapped():
-            if has_text:
-                self._search_clear.pack(side="left", padx=(0, 4))
-            else:
-                self._search_clear.pack_forget()
-        if self._search_job is not None:
-            self._search_box.after_cancel(self._search_job)
-        self._search_job = self._search_box.after(SEARCH_DELAY_MS, self._apply_search)
+        self._search_clear.setVisible(bool(text))
+        self._search_timer.start()
 
     def _apply_search(self):
-        if self._search_job is not None:
-            self._search_box.after_cancel(self._search_job)
-            self._search_job = None
+        self._search_timer.stop()
         query = _words(self._typed)
         if query != self._query:
             self._query = query
             self._refresh_results()
 
     def clear_search(self):
-        self._search_entry.delete(0, "end")
-        self._on_typed()                    # hides ✖
+        self._search_entry.clear()          # _on_typed hides ✖
         self._apply_search()
 
     def _rank(self, key):
-        """None when *key* does not match the search; else a sort key, lower is better:
-        0 every word starts a word of the name, 1 all in the name, 2 elsewhere."""
-        name = _words(self._labels[key].cget("text"))
+        """None when *key* does not match; else 0 every word starts a word of the
+        name, 1 all in the name, 2 elsewhere (lower is better)."""
+        name = _words(self._labels[key])
         section = "cloned voice clone" if self._groups.get(key) == CLONE_GROUP else "effect"
         hay = " ".join(name + _words(f"{self._descs.get(key, '')} {key} {section}"))
         if not all(w in hay for w in self._query):
@@ -360,44 +348,36 @@ class EffectsPanel:
         return 1 if all(w in " ".join(name) for w in self._query) else 2
 
     def _refresh_results(self):
-        """Show the matches as rows in the Results panel. Cloned Voices and
-        Effects are left as they are, since re-gridding ~170 tiles takes about a second."""
         self._res_by_key.clear()
         if not self._query:
             for row in self._res_rows:
-                row.unbind_var()
-            self._res_sec.place_forget()
+                row.key = None
+            self._results.hide()
+            self._body.setMinimumHeight(0)
             self._active = 0
-            self._search_count.configure(text="")
+            self._search_count.setText("")
             return
         order = {e["key"]: i for i, e in enumerate(EFFECTS_REGISTRY)}
-        ranked = []
-        for key in self._tiles:
-            r = self._rank(key)
-            if r is not None:
-                ranked.append((r, order.get(key, 0), key))
-        matches = [k for _r, _o, k in sorted(ranked)]
+        ranked = sorted((r, order.get(k, 0), k) for k in self._tiles
+                        for r in [self._rank(k)] if r is not None)
+        matches = [k for _r, _o, k in ranked]
         shown = matches[:MAX_RESULTS]
         while len(self._res_rows) < len(shown):
-            self._res_rows.append(_ResultRow(self._res_list, self, len(self._res_rows)))
+            row = _ResultRow(self, len(self._res_rows))
+            self._res_rows.append(row)
+            self._res_list.addWidget(row)
         for i, row in enumerate(self._res_rows):
             if i < len(shown):
                 key = shown[i]
-                row.show(key, self._labels[key].cget("text"), self._descs.get(key, ""),
-                         self._vars[key], key in self._fav_keys)
+                row.show_key(key, self._labels[key], self._descs.get(key, ""), self._on[key],
+                             key in self._fav_keys)
                 self._res_by_key[key] = row
             else:
+                row.key = None
                 row.hide()
         self._set_active(0)
-
         n = len(matches)
-        self._search_count.configure(text=f"{n} result{'s' if n != 1 else ''}" if n else "")
-        # an empty CTkFrame keeps its default 200 px height, so the list goes when it has no rows
-        if shown and not self._res_list.winfo_manager():
-            above_note = {"before": self._res_note} if self._res_note.winfo_manager() else {}
-            self._res_list.pack(fill="x", padx=10, pady=(0, 10), **above_note)
-        elif not shown and self._res_list.winfo_manager():
-            self._res_list.pack_forget()
+        self._search_count.setText(f"{n} result{'s' if n != 1 else ''}" if n else "")
         typed = self._typed.strip()
         if not n:
             note = f"No effects or voices match “{typed}”."
@@ -405,21 +385,29 @@ class EffectsPanel:
             note = f"Showing {len(shown)} of {n}. Type more to narrow it down."
         else:
             note = ""
-        if note != self._res_note.cget("text"):
-            self._res_note.configure(text=note)
-        if note and not self._res_note.winfo_manager():
-            self._res_note.pack(fill="x", padx=14, pady=(0, 10))
-        elif not note and self._res_note.winfo_manager():
-            self._res_note.pack_forget()
-        if not self._res_sec.winfo_manager():
-            self._res_sec.place(x=0, y=0, relwidth=1.0)
-            self._res_sec.lift()
+        self._res_note.setText(note)
+        self._res_note.setVisible(bool(note))
+        self._results.show()
+        self._place_results()
+        self._results.raise_()
+
+    def _place_results(self):
+        """Lay the Results panel over the top of the tiles, full width."""
+        if not self._results.isVisible():
+            return
+        self._results.layout().activate()
+        h = self._results.sizeHint().height()
+        self._results.setGeometry(0, 0, self._body.width(), h)
+        # With few tiles the body could be shorter than the panel: make room.
+        # Compare with the body's natural height, not its current one, so a
+        # resize cannot flip the minimum on and off.
+        natural = self._body.layout().sizeHint().height()
+        self._body.setMinimumHeight(h if h > natural else 0)
 
     def _shown_rows(self):
         return [r for r in self._res_rows if r.key is not None]
 
     def _set_active(self, i):
-        """Highlight row i: Enter switches it."""
         rows = self._shown_rows()
         if not rows:
             self._active = 0
@@ -432,100 +420,86 @@ class EffectsPanel:
         if self._query:
             self._apply_search()
             self._set_active(self._active + step)
-        return "break"
 
     def _toggle_active(self):
         """Enter: switch the highlighted result on or off."""
-        self._apply_search()                        # in case Enter came before the delay
+        self._apply_search()
         rows = self._shown_rows()
         if rows:
             self.toggle_effect(rows[min(self._active, len(rows) - 1)].key)
-        return "break"
 
     def toggle_effect(self, key):
         """Switch *key* on or off as its switch would, with the group rule."""
-        if key in self._vars:
-            self.set_active(key, not self._vars[key].get())
+        if key in self._on:
+            self.set_active(key, not self._on[key])
 
     def _on_edit_clicked(self):
         if self.on_edit_clones:
             self.on_edit_clones()
 
-    # ── tiles ──────────────────────────────────────────────────────
-    def _build_tile(self, parent, key, label, desc, var, group):
-        """One effect tile: switch and heart on the first line, description below."""
-        tile = ctk.CTkFrame(parent, fg_color=COLORS["bg_input"],
-                            corner_radius=10, border_width=1,
-                            border_color=COLORS["border"])
-        inner = ctk.CTkFrame(tile, fg_color="transparent")
-        inner.pack(fill="x", padx=(10, 6), pady=6)
-        inner.columnconfigure(0, weight=1)
-        switch = ctk.CTkSwitch(inner, text=label, font=FONTS["body"],
-                               text_color=COLORS["text_primary"], variable=var,
-                               onvalue=True, offvalue=False,
-                               button_color=COLORS["accent_primary"],
-                               button_hover_color=COLORS["accent_secondary"],
-                               progress_color=COLORS["switch_on"],
-                               fg_color=COLORS["switch_off"],
-                               switch_width=36, switch_height=18,
-                               command=(lambda k=key: self._on_toggle(k)) if group else None)
-        switch.grid(row=0, column=0, sticky="w")
-        heart = ctk.CTkButton(inner, text=HEART_OFF, font=HEART_FONT, width=32, height=28,
-                              corner_radius=6, fg_color="transparent", hover_color=COLORS["bg_card"],
-                              text_color=COLORS["text_muted"],
-                              command=lambda k=key: self.toggle_favourite(k))
-        heart.grid(row=0, column=1, sticky="e")
-        # anchor="w": on narrow windows long descriptions clip at the end, not both sides
-        ctk.CTkLabel(inner, text=desc, font=("Segoe UI", 10), anchor="w",
-                     text_color=COLORS["text_muted"]).grid(row=1, column=0, columnspan=2,
-                                                           sticky="ew", padx=(42, 0))
-        return tile, switch, heart
+    # ── state ──────────────────────────────────────────────────────
+    def _show_state(self, key):
+        """Redraw every switch that shows *key*."""
+        on = self._on.get(key, False)
+        for sw in self._views.get(key, []):
+            if sw.isChecked() != on:
+                sw.blockSignals(True)
+                sw.setChecked(on)
+                sw.blockSignals(False)
+        row = self._res_by_key.get(key)
+        if row is not None:
+            row.switch.setChecked(on)
 
+    def _set(self, key, value):
+        self._on[key] = bool(value)
+        self._show_state(key)
+
+    def _user_toggle(self, key, checked):
+        """A tile or mirror switch was clicked."""
+        self._set(key, checked)
+        if key in self._groups:
+            self._on_toggle(key)
+
+    # ── tiles ──────────────────────────────────────────────────────
     def _add_tile(self, effect):
         key, label, desc = effect["key"], effect["label"], effect["desc"]
-        var = ctk.BooleanVar(value=effect.get("default", False))
-        group = effect.get("exclusive_group")
-        self._vars[key] = var
+        self._on[key] = bool(effect.get("default", False))
+        self._labels[key] = label
         self._descs[key] = desc
+        group = effect.get("exclusive_group")
         if group:
             self._groups[key] = group
-        parent = self._clone_grid if group == CLONE_GROUP else self._fx_grid
-        tile, switch, heart = self._build_tile(parent, key, label, desc, var, group)
+        tile = _Tile(self, key, label, desc, self._on[key])
         self._tiles[key] = tile
-        self._labels[key] = switch
-        self._hearts[key] = heart
+        self._views[key] = [tile.switch]
         if key in self._fav_keys:
-            self._add_mirror(effect)
-        self._paint_hearts(key)
+            self._add_mirror(key)
 
-    # ── favourites ─────────────────────────────────────────────────
-    def _add_mirror(self, effect):
-        """A copy of the tile in Favourites, sharing the original's switch variable."""
-        key = effect["key"]
-        if key in self._fav_tiles or key not in self._vars:
+    def _add_mirror(self, key):
+        if key in self._fav_tiles or key not in self._tiles:
             return
-        tile, switch, heart = self._build_tile(self._fav_grid, key, self._labels[key].cget("text"),
-                                               effect["desc"], self._vars[key], self._groups.get(key))
+        tile = _Tile(self, key, self._labels[key], self._descs.get(key, ""), self._on[key])
         self._fav_tiles[key] = tile
-        self._fav_labels[key] = switch
-        self._fav_hearts[key] = heart
+        self._views[key].append(tile.switch)
 
     def _remove_mirror(self, key):
-        self._fav_labels.pop(key, None)
-        self._fav_hearts.pop(key, None)
         tile = self._fav_tiles.pop(key, None)
         if tile is not None:
-            tile.destroy()
+            if key in self._views and tile.switch in self._views[key]:
+                self._views[key].remove(tile.switch)
+            tile.setParent(None)
+            tile.deleteLater()
 
     def _paint_hearts(self, key):
         on = key in self._fav_keys
-        if key in self._res_by_key:
-            self._res_by_key[key].paint_heart(on)
-        for h in (self._hearts.get(key), self._fav_hearts.get(key)):
-            if h is not None:
-                h.configure(text=HEART_ON if on else HEART_OFF,
-                            text_color=COLORS["accent_primary"] if on else COLORS["text_muted"])
+        for t in (self._tiles.get(key), self._fav_tiles.get(key)):
+            if t is not None:
+                _paint_heart(t.heart, on)
+        row = self._res_by_key.get(key)
+        if row is not None:
+            _paint_heart(row.heart, on)
 
+    # ── favourites ─────────────────────────────────────────────────
     def is_favourite(self, key) -> bool:
         return key in self._fav_keys
 
@@ -536,7 +510,7 @@ class EffectsPanel:
             self._remove_mirror(key)
         elif key in self._tiles:
             self._fav_keys.append(key)
-            self._add_mirror(next(e for e in EFFECTS_REGISTRY if e["key"] == key))
+            self._add_mirror(key)
         else:
             return
         self._paint_hearts(key)
@@ -563,38 +537,42 @@ class EffectsPanel:
             self._notify_favourites()
         tile = self._tiles.pop(key, None)
         if tile is not None:
-            tile.destroy()
-        self._hearts.pop(key, None)
+            tile.setParent(None)
+            tile.deleteLater()
+        self._views.pop(key, None)
         self._labels.pop(key, None)
         self._descs.pop(key, None)
-        var = self._vars.pop(key, None)
+        was_on = self._on.pop(key, False)
         group = self._groups.pop(key, None)
-        if group and var is not None and var.get():
+        if group and was_on:
             self._notify(group)
+
+    @staticmethod
+    def _place(grid, widgets, empty_label):
+        while grid.count():
+            grid.takeAt(0)
+        for i, w in enumerate(widgets):
+            r, c = divmod(i, NUM_COLS)
+            grid.addWidget(w, r, c)
+            w.show()
+        if empty_label is None:
+            return
+        if widgets:
+            empty_label.hide()
+        else:
+            grid.addWidget(empty_label, 0, 0, 1, NUM_COLS)
+            empty_label.show()
 
     def _regrid(self):
         clone_keys, fx_keys = [], []
         for e in EFFECTS_REGISTRY:
             if e["key"] in self._tiles:
                 (clone_keys if e.get("exclusive_group") == CLONE_GROUP else fx_keys).append(e["key"])
-        for keys in (clone_keys, fx_keys):
-            for i, key in enumerate(keys):
-                r, c = divmod(i, self._num_cols)
-                self._tiles[key].grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
-        fav_keys = [k for k in self._fav_keys if k in self._fav_tiles]
-        for i, key in enumerate(fav_keys):
-            r, c = divmod(i, self._num_cols)
-            self._fav_tiles[key].grid(row=r, column=c, padx=4, pady=4, sticky="nsew")
-        if fav_keys:
-            self._fav_empty.grid_forget()
-        else:
-            self._fav_empty.grid(row=0, column=0, columnspan=self._num_cols,
-                                 padx=6, pady=(2, 4), sticky="w")
-        if clone_keys:
-            self._clone_empty.grid_forget()
-        else:
-            self._clone_empty.grid(row=0, column=0, columnspan=self._num_cols,
-                                   padx=6, pady=(2, 4), sticky="w")
+        self._place(self._clone_grid, [self._tiles[k] for k in clone_keys], self._clone_empty)
+        self._place(self._fx_grid, [self._tiles[k] for k in fx_keys], None)
+        fav = [self._fav_tiles[k] for k in self._fav_keys if k in self._fav_tiles]
+        self._place(self._fav_grid, fav, self._fav_empty)
+        self._place_results()
 
     def sync(self):
         """Match tiles to EFFECTS_REGISTRY: add new entries, drop removed ones, re-grid."""
@@ -605,10 +583,12 @@ class EffectsPanel:
             key = effect["key"]
             if key not in self._tiles:
                 self._add_tile(effect)
-            elif self._labels[key].cget("text") != effect["label"]:
-                self._labels[key].configure(text=effect["label"])
-                if key in self._fav_labels:
-                    self._fav_labels[key].configure(text=effect["label"])
+            elif self._labels[key] != effect["label"]:
+                self._labels[key] = effect["label"]
+                for t in (self._tiles[key], self._fav_tiles.get(key)):
+                    if t is not None:
+                        t.switch.setText(effect["label"])
+                        t.switch.update()
         self._regrid()
         if self._query:                     # new, renamed or deleted voices may match now
             self._refresh_results()
@@ -616,10 +596,10 @@ class EffectsPanel:
     # ── exclusive groups ───────────────────────────────────────────
     def _on_toggle(self, key):
         group = self._groups.get(key)
-        if group and self._vars[key].get():
+        if group and self._on.get(key):
             for other, g in self._groups.items():
-                if g == group and other != key:
-                    self._vars[other].set(False)
+                if g == group and other != key and self._on.get(other):
+                    self._set(other, False)
         if group:
             self._notify(group)
 
@@ -637,23 +617,23 @@ class EffectsPanel:
 
     def active_in_group(self, group):
         for key, g in self._groups.items():
-            if g == group and self._vars[key].get():
+            if g == group and self._on.get(key):
                 return key
         return None
 
     def set_active(self, key, value=True):
         """Switch an effect on or off from code, applying its group rule."""
-        if key not in self._vars:
+        if key not in self._on:
             return
-        self._vars[key].set(bool(value))
+        self._set(key, value)
         if key in self._groups:
             self._on_toggle(key)
 
     def clear_group(self, group):
         for key, g in self._groups.items():
             if g == group:
-                self._vars[key].set(False)
+                self._set(key, False)
         self._notify(group)
 
     def get_active_effects(self) -> dict:
-        return {key: var.get() for key, var in self._vars.items()}
+        return dict(self._on)

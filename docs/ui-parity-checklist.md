@@ -1,6 +1,10 @@
 # UI Parity Checklist
 
-What the CustomTkinter UI does today, one line per control or behavior. Each
+What the CustomTkinter UI did, one line per control or behavior. That window
+(`ui/`) was deleted on 2026-10-14; the file references below point into it,
+so read them in git history (for example `git show 1d21765:ui/app.py`). The
+Qt port then moved from `ui_qt/` to `ui/`: "Qt port" notes below that name
+`ui_qt/...` mean today's `ui/...`. Each
 phase of the PySide6 port (see `pyside6-migration-plan.md`) is checked against
 the sections it touches. Tick a box only after trying it in the Qt build.
 

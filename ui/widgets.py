@@ -1,5 +1,5 @@
 """
-ui_qt/widgets.py
+ui/widgets.py
 ────────────────
 Small widgets shared by the Qt panels.
 """
@@ -9,13 +9,13 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QHBoxLayout, QLabe
                                QPushButton, QSizePolicy, QSlider, QStyle, QStyleOptionSlider, QWidget)
 
 from core.constants import COLORS
-from ui_qt import icons
+from ui import icons
 
 ICON_GAP = 6
 
 
 class IconLabel(QLabel):
-    """A QLabel that shows a leading emoji as a line icon (ui_qt.icons).
+    """A QLabel that shows a leading emoji as a line icon (ui.icons).
 
     setText("⚠  Could not play") draws the warning icon, then "Could not play".
     The icon takes the label's current text color, so a status that turns red
@@ -81,7 +81,7 @@ class IconLabel(QLabel):
 
 
 class IconButton(QPushButton):
-    """A QPushButton that shows a leading emoji as a line icon (ui_qt.icons).
+    """A QPushButton that shows a leading emoji as a line icon (ui.icons).
 
     Works for later setText() calls too ("▶  Play" -> "■  Stop"). The icon is
     drawn in the button's text color, and muted when the button is disabled.

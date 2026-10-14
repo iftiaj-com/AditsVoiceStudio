@@ -19,7 +19,7 @@ Welcome to the **Adits Voice Studio** codebase guide. This document serves as a 
 
 ## 🎙 Application Overview
 
-**Adits Voice Studio** (formerly VoiceCraft TTS Studio) is a modular, desktop-based Text-to-Speech (TTS) Studio built in Python. It provides a premium, responsive dark-themed dashboard using CustomTkinter, allowing users to synthesize high-quality speech from text and apply real-time DSP (Digital Signal Processing) effects. 
+**Adits Voice Studio** (formerly VoiceCraft TTS Studio) is a modular, desktop-based Text-to-Speech (TTS) Studio built in Python. It provides a premium, responsive dark-themed dashboard using PySide6 (Qt 6), allowing users to synthesize high-quality speech from text and apply real-time DSP (Digital Signal Processing) effects. 
 
 ### Key Highlights
 * **Multi-Engine Support**: Supports cloud-based APIs (Google Translate TTS, Microsoft Edge Neural) and local offline AI models (Kokoro-82M, MeloTTS, Piper TTS, and local system SAPI5 voices).
@@ -35,7 +35,7 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 
 | Path | File / Folder Type | Description |
 | :--- | :--- | :--- |
-| `tts_app.py` | Entry Point Script | The main application entry point. Initializes the CustomTkinter runtime and starts `AditsVoiceStudioApp`. |
+| `tts_app.py` | Entry Point Script | The main application entry point. Runs `--selftest`, holds the single-instance mutex, sweeps orphaned temp folders and starts the Qt window (`ui.app.run()`). |
 | `run.ps1` | Shell Script | PowerShell launcher that automatically checks for and triggers the application via the local virtual environment (`venv_311`). |
 | `requirements.txt` | Package Dependencies | Dependencies grouped per engine, plus GUI, playback and DSP libraries. Ends with a note on why `kokoro-onnx` must be installed separately with `--no-deps`. |
 | `build_exe.py` | Packaging Script | PyInstaller build of the public release. Bundles only the models the app reads, excludes gTTS/Edge and unused packages, prunes build-only files, writes license notices, then self-tests the frozen EXE. `--installer` also compiles `installer.iss`. Refuses to run from an interpreter that cannot import every engine library, and refuses to bundle truncated Kokoro weights. Outputs `dist/AditsVoiceStudio/AditsVoiceStudio.exe`. |
@@ -48,8 +48,8 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `├── audio_io.py` | Audio I/O | MP3 encode and non-WAV decode through soundfile's libsndfile, so no ffmpeg is needed. |
 | `├── pipeline.py` | Generation Pipeline | `run(request, synth, tmp_dir, cancel_event, progress, status, warn)`: synthesize, skip silences, speed, voice effects, EQ, ambiance, normalize, subtitles, MP3. Takes a `GenerationRequest` of plain settings read on the UI thread and returns a `GenerationResult`; raises `Cancelled`. No UI imports. |
 | `├── synth.py` | Synthesizer | `Synthesizer` (`app.synth`): the engine map, `lock` (one `engine.synthesize()` at a time), `engine_kwargs()` and `synthesize(text, tmp_dir, eng_settings)`. Used by generation, the Clone Voice tools and the voice match. |
-| `├── voice_selection.py` | Engine Selections | Engine kinds, speed ranges and labels (`format_speed`), `describe_selection`, `synthesis_key`, and resolving a cloned voice's base voice against the engines and voices on offer (`resolve_selection`, `settings_for_selection`). Both engine panels and the Clone Voice code use it; the CTk `EnginePanel` keeps its method names and calls these. |
-| `├── defaults.py` | Starting Settings | `engine_settings()`, `customization_settings()`, `active_effects()`: the panels' `get_settings()` values right after start, as plain dicts. The Qt UI generates with them until it has those panels. Keep them equal to the CTk panels' starting values. |
+| `├── voice_selection.py` | Engine Selections | Engine kinds, speed ranges and labels (`format_speed`), `describe_selection`, `synthesis_key`, and resolving a cloned voice's base voice against the engines and voices on offer (`resolve_selection`, `settings_for_selection`). The engine panel and the Clone Voice code use it; `EnginePanel` exposes the same names and calls these. |
+| `├── defaults.py` | Starting Settings | `engine_settings()`, `customization_settings()`, `active_effects()`: the panels' `get_settings()` values right after start, as plain dicts. Only `default_engine_name()` is used today; keep the rest equal to the Qt panels' starting values. |
 | `├── gpu.py` | GPU Check | `cuda_available()`: `torch.cuda.is_available()` without importing torch (about 3 s). Uses torch's own answer once torch is loaded; otherwise checks for a CUDA build of torch (`torch_cuda.dll`) and asks `nvcuda.dll` for a device (0.08 s). Used for the GPU toggle, the engine device and Whisper. |
 | `├── playback.py` | Playback | `Player`: plays the generated speech on `pygame.mixer.music`. No thread: the UI polls `is_playing()` / `fraction()` from a timer. |
 | `├── selftest.py` | Self-test | `AditsVoiceStudio.exe --selftest report.json` runs every offline engine headless and checks real output. |
@@ -82,28 +82,14 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `├── audio_effects.py` | DSP Library | Static class containing numerical calculations (using NumPy and Librosa) for pitch, speed, vocoders, ambiance mixers, and filters. |
 | `├── registry.py` | Effects Registry | Declares `EFFECTS_REGISTRY`, configuring how each voice effect is displayed, toggled, and called. Appends cloned voices at import. |
 | `└── cloned_voices.py` | Cloned Voice Effects | Turns each ready voice into a `clone:<slug>` registry entry and converts audio through the worker. |
-| **`ui/`** | Directory | GUI presentation layer. |
-| `├── app.py` | Core GUI Controller | The main window class `AditsVoiceStudioApp`. Orchestrates the background thread worker, playback systems, and save actions. |
-| `├── theme.py` | UI Factory | Helper functions for creating CustomTkinter standard panels, dropdowns, sliders, and switches. `SmoothScrollableFrame` (the right column) eases wheel scrolling: CTk's own handler moves 20 px and redraws on every wheel event, and with about 900 widgets each redraw takes 15 to 20 ms, so fast spins stuttered. |
-| `└── panels/` | Directory | Custom panel sub-widgets. |
-| `    ├── text_panel.py` | GUI Widget | Renders the text area and updates the live character count. Title bar has 🎤 and **+**. 🎤 starts `core.dictation.Dictation`: the sample (or an empty box) is cleared at once, the phrase being spoken shows as gray live text (tag `dict_live`, written with undo off, left out of `get_text()` and the counter, removed before any undo), and each finished phrase replaces it as its own undo step; the title bar shows Loading / ● Listening / ● Hearing you / ✎ Writing. Click again or Esc stops it, and phrases already heard are still written. `cleanup()` (called from `AditsVoiceStudioApp.destroy()`) closes the mic. **+** is a menu with Import captions or text and Transcribe audio or video. An import replaces an empty box or `SAMPLE_TEXT` without asking, and asks Replace / Append / Cancel over the user's own text (`_ask_mode()`). Each import or transcription is one undo step (Ctrl+Z, `_begin_edit()` / `_end_edit()`). Transcribe opens a media strip under the box: ▶ / ❚❚, seek bar and ✖ (pygame channel 7, file decoded on first ▶), plus progress and Cancel. Segments are added as Whisper finishes them, with the box read-only until the job ends; Cancel keeps the text so far, and a file with no speech or a read error leaves the box as it was. The footer row has Copy, Paste (appends after the user's own text, replaces an empty box or the sample), Paste & Replace, Clear, and ↶ / ↷ (greyed out through `edit canundo` / `canredo` on `<<UndoStack>>`); each edit is one undo step and is refused while a transcription runs. The counter follows `<<Modified>>`, once per idle. Long text with no line breaks is slow to select: Tk's drag handler runs `update idletasks` on every mouse move and re-lays out the whole paragraph (measured in the app: about 300 ms stalls at 29k characters, 720 ms at 58k; under 12k characters it stays under 40 ms). |
-| `    ├── engine_panel.py` | GUI Widget | Engine dropdown, GPU toggle, and dynamically swapped configuration screens for each engine. |
-| `    ├── effects_panel.py` | GUI Widget | Displays visual toggle cards for each effect registered in the effects registry, in three sub-sections: Favourites, Cloned Voices (with the ✏️ button) and Effects. The ♡ on each card adds a mirror card to Favourites that shares the original's switch variable, so both always show the same state. Favourite keys are saved in `%LOCALAPPDATA%\AditsVoiceStudio\settings\favourites.json`; a deleted cloned voice is dropped from it. The 🔍 box on the title line searches every effect and cloned voice (all typed words, in name, description or section; names starting with the words first). Up to 8 matches show as rows in a Results panel `place()`d over the top of the card; each row (`_ResultRow`, plain Tk widgets) shares the effect's `BooleanVar`. Click a row or press Enter to switch it (group rule applies), ↑ / ↓ move the highlight, the heart favourites it, Esc or ✖ clears. Speed, with about 170 tiles: hiding and re-showing the tiles took 0.6 to 1.5 s, a Results section in the layout moved every widget under it (0.4 to 1.2 s), and refilling CTk tiles cost 30 to 80 ms each; the overlay of Tk rows takes 4 to 150 ms a search. |
-| `    ├── customization_panel.py` | GUI Widget | Contains speed sliders, silence skipping, background ambiance selectors, sub-tracks, and the Clone Voice group. |
-| `    ├── clone_voice_group.py` | GUI Widget | Clone Voice group: install, active-voice settings, voice creation, time estimates, Cancel. |
-| `    ├── clone_voice_dialog.py` | GUI Widget | Window opened by the ✏️ button in the Cloned Voices header: rename, change the base voice, speed and sound settings (with ▶ Preview and 🎯 Match), delete. |
-| `    ├── analyzer_dialog.py` | GUI Widget | Voice match: one run (bank update, clip analysis, ▶ Result for each shortlisted voice), ranked Best / Close matches with ▶ Original / ▶ Result toggles and Apply, which hands the Result to the next Quick voice as its preview. |
-| `    ├── record_dialog.py` | GUI Widget | Microphone recorder for clone clips: device picker, level meter, live waveform, preview with seek, Add to clips. |
-| `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
-| `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
-| **`ui_qt/`** | Directory | The PySide6 window, the default since migration phase 6 (see `docs/pyside6-migration-plan.md`). The classic CustomTkinter window in `ui/` stays for one release as a fallback: `tts_app.py --ui ctk` or `ADITS_UI=ctk`. Has the main window, every panel, the Clone Voice group and its four dialogs. `ui_qt/app.py` imports nothing heavy at the top: the window opens with Text Input, Playback (Generate reads "Starting…") and a loading card, while a thread imports the engine adapters and `core.pipeline` and reads the system voices; the right-hand panels are then built one per event-loop turn. No TTS library or model loads at start (see *Which engines appear in the dropdown*): measured from source, window at 2.0 s and panels ready at 4.8 s, against about 27 s before. The first Generate with an engine pays for its imports instead. `MainWindow(background=False)` loads before returning, for the self-test. |
-| `├── app.py` | Qt Main Window | `MainWindow` and `run()`: header, fixed 50/50 columns, status bar, and the generation, playback and save flow through `core.pipeline`. The right column is a placeholder until the engine, customization and effects panels are ported. |
-| `├── theme.py` | Qt Look | One style sheet from `COLORS` / `FONTS` (font sizes as px, like CTk). Buttons get their look from the `role` property. `icon_font()` sets a font the sheet cannot override. |
+| **`ui/`** | Directory | The window (PySide6). Until 2026-10-14 this folder was `ui_qt/` and `ui/` held the CustomTkinter window it replaced (see `docs/pyside6-migration-plan.md`); git history before that date uses the old names. Has the main window, every panel, the Clone Voice group and its four dialogs. `ui/app.py` imports nothing heavy at the top: the window opens with Text Input, Playback (Generate reads "Starting…") and a loading card, while a thread imports the engine adapters and `core.pipeline` and reads the system voices; the right-hand panels are then built one per event-loop turn. No TTS library or model loads at start (see *Which engines appear in the dropdown*): measured from source, window at 2.0 s and panels ready at 4.8 s, against about 27 s before. The first Generate with an engine pays for its imports instead. `MainWindow(background=False)` loads before returning, for the self-test. |
+| `├── app.py` | Qt Main Window | `MainWindow` and `run()`: header, fixed 50/50 columns, status bar, and the generation, playback and save flow through `core.pipeline`. |
+| `├── theme.py` | Qt Look | One style sheet from `COLORS` / `FONTS` (font sizes as px). Buttons get their look from the `role` property. `icon_font()` sets a font the sheet cannot override. |
 | `├── bridge.py` | Thread Bridge | `ui(fn, *args)` runs a call on the GUI thread through a queued signal, the Qt counterpart of `after(0, ...)`. Workers must never touch a widget directly. |
 | `├── icons.py` | Line Icons | The Qt window shows no emoji. `split(text)` turns a leading emoji ("✅  Saved", "🎤") into a Lucide icon name and the plain text; `effect_icon(key)` picks one icon per effect (cloned voices: `dna`); `pixmap()` / `icon()` draw an SVG in any color at the screen's pixel ratio, cached. To add an icon, put its SVG from the same lucide-static version in `assets/icons/lucide/` and map it in `EMOJI` or `EFFECTS`. The shared registry and core messages keep their emoji for the CTk window. |
-| `├── widgets.py` | Shared Widgets | `IconLabel` / `IconButton` (QLabel / QPushButton that show a leading emoji as an icon in the text color, also after `setText`; IconLabel centres the icon on the first text line wherever alignment and wrapping put it, and IconButton takes the Active palette color so a button built disabled does not keep a grey icon; `theme.label()`, `theme.button()` and card titles create them), `ToggleSwitch` (drawn like CTkSwitch, optional icon, text cut with …), `ValueSlider` (float range over QSlider's ints, `set_range()`), `Segmented` (CTkSegmentedButton), `ProgressButton` (IconButton with a translucent fill from the left, `set_progress()`), `ElidedLabel`, `SeekSlider` (milliseconds; a click on the groove jumps there) and `ask_choice()` (Replace / Append / Cancel style question). |
-| `└── panels/` | Directory | `text_panel.py`, `playback_panel.py`, `engine_panel.py`, `customization_panel.py` and `effects_panel.py`, ported from `ui/panels/` with the same behavior and public methods (`docs/ui-parity-checklist.md`). The effects panel keeps one on/off value per key and redraws every switch showing it (tile, Favourites mirror, search row), in place of CTk's shared `BooleanVar`; it reads and writes the same `favourites.json`. In `text_panel.py` the phrase being dictated shows in a gray line under the box, because Qt clears the undo history when undo is switched off. `playback_panel.py` has one filled button, Generate, which turns into Cancel while a run is on, with the progress filling it from the left and the percentage in its text (no separate progress bar). Play and Stop are one toggle, filled by the playback position. Save is a menu: MP3, WAV (converted from the MP3 when an online engine made no WAV) or SRT; an MP3 or WAV save also writes the SRT beside it. Folder is always on. The Clean-up tile in `clone_voice_group.py` has no Skip silences switch (it always sends `skip_silences=False`); its third column holds Preview cleanup and ▶ Original / ▶ Cleaned, shown only while music removal is on. `clone_voice_group.py` (the Clone Voice box; the Active voice picker is a QComboBox with a ♥ delegate), `clone_voice_dialog.py` (✏️ Cloned Voices), `record_dialog.py`, `timeline_dialog.py` and `analyzer_dialog.py` follow their CTk counterparts; their jobs come from `core/voice_cloning/tasks.py`. |
-| **`docs/`** | Directory | `pyside6-migration-plan.md` (phases and results) and `ui-parity-checklist.md` (every control of the CTk UI, with possible bugs found). |
+| `├── widgets.py` | Shared Widgets | `IconLabel` / `IconButton` (QLabel / QPushButton that show a leading emoji as an icon in the text color, also after `setText`; IconLabel centres the icon on the first text line wherever alignment and wrapping put it, and IconButton takes the Active palette color so a button built disabled does not keep a grey icon; `theme.label()`, `theme.button()` and card titles create them), `ToggleSwitch` (rounded track and knob, optional icon, text cut with …), `ValueSlider` (float range over QSlider's ints, `set_range()`), `Segmented` (a row of exclusive buttons), `ProgressButton` (IconButton with a translucent fill from the left, `set_progress()`), `ElidedLabel`, `SeekSlider` (milliseconds; a click on the groove jumps there) and `ask_choice()` (Replace / Append / Cancel style question). |
+| `└── panels/` | Directory | `text_panel.py`, `playback_panel.py`, `engine_panel.py`, `customization_panel.py` and `effects_panel.py`, ported from the CustomTkinter panels with the same behavior and public methods (`docs/ui-parity-checklist.md` lists every control; the old per-panel notes are in git history, `git show 1d21765:AGENTS.md`). The effects panel keeps one on/off value per key and redraws every switch showing it (tile, Favourites mirror, search row), in place of CTk's shared `BooleanVar`; it reads and writes the same `favourites.json`. In `text_panel.py` the phrase being dictated shows in a gray line under the box, because Qt clears the undo history when undo is switched off. `playback_panel.py` has one filled button, Generate, which turns into Cancel while a run is on, with the progress filling it from the left and the percentage in its text (no separate progress bar). Play and Stop are one toggle, filled by the playback position. Save is a menu: MP3, WAV (converted from the MP3 when an online engine made no WAV) or SRT; an MP3 or WAV save also writes the SRT beside it. Folder is always on. The Clean-up tile in `clone_voice_group.py` has no Skip silences switch (it always sends `skip_silences=False`); its third column holds Preview cleanup and ▶ Original / ▶ Cleaned, shown only while music removal is on. `clone_voice_group.py` (the Clone Voice box; the Active voice picker is a QComboBox with a ♥ delegate), `clone_voice_dialog.py` (✏️ Cloned Voices), `record_dialog.py`, `timeline_dialog.py` and `analyzer_dialog.py` follow their CustomTkinter originals; their jobs come from `core/voice_cloning/tasks.py`. |
+| **`docs/`** | Directory | `pyside6-migration-plan.md` (phases and results) and `ui-parity-checklist.md` (every control of the deleted CustomTkinter UI, with possible bugs found). |
 | **`vc_runtime/`** | Directory | Code that runs **inside** the voice-cloning venvs and is never imported by the app: `worker.py`, `vc_common.py`, `rvc_backend.py`, `seedvc_backend.py`, `train_site/sitecustomize.py`, and the pinned `requirements-*.txt` / `.lock.txt`. |
 | **`vc_runtime_data/`** | Directory (gitignored) | The installed runtime when running from source: venvs, Applio and seed-vc clones, logs, and the voice library. |
 | **`models/`** | Directory | Storage for local model files (e.g. Piper `.onnx` files). |
@@ -119,7 +105,7 @@ Adits Voice Studio utilizes a decoupled, event-driven design. The user interface
 
 ```mermaid
 graph TD
-    User([User Text & Options]) --> UI[CustomTkinter GUI]
+    User([User Text & Options]) --> UI[Qt window]
     UI -->|Click Generate| WT[Background Worker Thread]
     
     subgraph Pipeline [Audio Synthesis & DSP Pipeline]
@@ -140,12 +126,12 @@ graph TD
 ```
 
 ### 2. Multi-Threading & UI Protection
-Because neural networks (MeloTTS, Kokoro, Piper) require substantial CPU/GPU compute, running synthesis on the main Tkinter thread would cause the UI to crash or become unresponsive. 
-* `_start_generation()` reads every setting on the Tk thread into a `core.pipeline.GenerationRequest`, then starts a daemon thread (`_generate_worker`) that runs `core.pipeline.run()`. The worker never reads a widget. Keep it that way: Qt, the planned next toolkit, crashes on widget access from other threads (see `docs/pyside6-migration-plan.md`).
-* Communications back to the UI (e.g. updating progress bars, editing status text, opening error dialogs) are scheduled using the safe Tkinter event loop scheduler `self.after(0, callback, args)`.
+Because neural networks (MeloTTS, Kokoro, Piper) require substantial CPU/GPU compute, running synthesis on the GUI thread would freeze the window.
+* `_start_generation()` reads every setting on the GUI thread into a `core.pipeline.GenerationRequest`, then starts a daemon thread (`_generate_worker`) that runs `core.pipeline.run()`. The worker never reads or touches a widget: Qt can crash on widget access from other threads.
+* Communications back to the UI (e.g. updating progress, editing status text, opening error dialogs) go through `ui.bridge.ui(callback, *args)`, which runs the call on the GUI thread.
 * A cancellation signal `self._stop_event` (a `threading.Event`) is periodically checked by the pipeline and the active engine to abort synthesis instantly; the pipeline then raises `core.pipeline.Cancelled`.
-* Playback has no thread: `_poll_playback` runs every 50 ms on `after()` and reads `core.playback.Player`.
-* Panels and dialogs reach the app only through its public members: `set_status()`, `synth`, `engine_panel`, `text_panel`, `cust_panel`, `system_voices`, `is_generating`, `refresh_cloned_voices()` (plus Tk's `after()`). Do not add new uses of its private `_` members.
+* Playback has no thread: `_poll_playback` runs every 50 ms on a `QTimer` and reads `core.playback.Player`.
+* Panels and dialogs reach the app only through its public members: `set_status()`, `synth`, `engine_panel`, `text_panel`, `cust_panel`, `system_voices`, `is_generating`, `refresh_cloned_voices()`. Do not add new uses of its private `_` members.
 
 ---
 
@@ -240,8 +226,8 @@ ENGINE_CLASSES = [
 ### Step 3: Add UI Configurations (Optional)
 If your engine has specific settings (e.g., custom voice maps or speed parameters):
 1. **Define Constants**: Add voice directories to [constants.py](file:///e:/Develop/Antigravity_testing/tts_app%20modular/core/constants.py).
-2. **Build Settings Frame**: Open [engine_panel.py](file:///e:/Develop/Antigravity_testing/tts_app%20modular/ui/panels/engine_panel.py). Add a `_build_my_cool_engine_frame()` method mimicking existing builders, storing widgets in `self._sub_frames["my_cool_engine"]`.
-3. **Register Switcher**: Add your engine's string identifying keyword into `key_map` inside the `_on_engine_change()` method.
+2. **Build Settings Box**: Open `ui/panels/engine_panel.py`. Add a `_build_my_cool_engine(lay)` method mimicking the existing builders (`_build_kokoro`, `_build_piper`, ...); each registers its options box in `self._sub[kind]`.
+3. **Register the Kind**: Add the engine name's keyword and its kind to `KIND_BY_KEYWORD` in `core/voice_selection.py`, so `engine_kind()` and `_on_engine_change()` find it.
 4. **Collect Settings**: Update `get_settings()` to include your new GUI widget values in the returned dictionary.
 
 ---
@@ -352,9 +338,8 @@ There are three ways to make a voice:
 ### Using it in the app
 
 * **Customization → Clone Voice → Active voice:** pick a voice (this switches its
-  tile on), then tune it. The picker opens `_VoiceList`, a scrolling list
-  (12 rows tall, ♥ beside each favourite) in place of CTk's `tk.Menu`, which
-  has no scrollbar on Windows. The ♡ after the picker adds the shown voice to
+  tile on), then tune it. The picker is a QComboBox whose list scrolls
+  (12 rows tall, ♥ beside each favourite). The ♡ after the picker adds the shown voice to
   Favourites or removes it, like the heart on its tile; it follows changes
   made there through `EffectsPanel.subscribe_favourites()`. RVC voices have Pitch (with 🎯 Match), Index rate and
   Protect. Quick voices have Quality steps. The estimate line shows how long the
@@ -374,8 +359,7 @@ There are three ways to make a voice:
   by side. ▶ Preview moves under the base voice for RVC voices so both tiles end
   level. In the Qt window the progress row with ✖ Cancel sits above the
   estimate and 🧬 Create Voice on the Create voice tab, and at the bottom of
-  the box on Active voice (`_dock_task()`). Explanations are hover tips (`_Tip`), not notes under the controls.
-  Never grid an empty `CTkFrame`: it keeps its default 200 px height.
+  the box on Active voice (`_dock_task()`). Explanations are hover tips (tooltips), not notes under the controls.
 * **Voice Effects → Cloned Voices → ✏️:** rename or delete voices, or change a
   voice's settings. **🔊 Voice settings ▾** opens an editor in the row: the base
   (engine, Kokoro language, voice, speed) and the sound sliders of the Clone
@@ -471,10 +455,11 @@ first, and cloning reads those copies (`clip["used"]`). The originals in
 * **Skip silences.** Applied last, to the trimmed and cleaned audio: pauses
   longer than 0.4 s are removed (threshold 16 dB under the clip's average,
   never above -40 dBFS, 150 ms kept around each phrase). Order: trim, remove
-  music / noise, skip silences. Stored as `prep.skip_silences`. Only the CTk
-  window still offers it. The Qt window dropped the switch on 2026-10-14: the
-  Seed-VC reference builder already removes long pauses, and Applio's
-  preprocessing slices training audio on silence, so it changed little.
+  music / noise, skip silences. Stored as `prep.skip_silences`. The window has
+  had no switch for it since 2026-10-14 and always sends False: the Seed-VC
+  reference builder already removes long pauses, and Applio's preprocessing
+  slices training audio on silence, so it changed little. The code stays in
+  `library.prepare_clips()`.
 
 Measured on `Voices-training\BLJ Voice over.mp3` (68.9 s, voice over music): the
 voice stem transcribed the same as the original; music-only stretches dropped
@@ -606,7 +591,7 @@ graph LR
   instead of failing. Each worker runs one request at a time (`_Worker.busy`).
   A worker that must make way for the other engine is stopped only after its
   running request ends (`VCClient._worker` waits outside the client lock, so
-  `is_warm()` on the Tk thread never blocks), and a queued request whose worker
+  `is_warm()` on the GUI thread never blocks), and a queued request whose worker
   was stopped meanwhile starts it again (`_WorkerGone`, retried by
   `VCClient._request`). Waiting still honours Cancel, and status callbacks get
   `client.WAITING`. Before 2026-10-13 the switch killed the running request
@@ -614,7 +599,7 @@ graph LR
   removal started during a generation). Each switch reloads the other model,
   so overlapping jobs on different engines take longer; results are unchanged.
 * Workers exit after 5 minutes idle, when the app closes their stdin, or on
-  `shutdown`. `AditsVoiceStudioApp.destroy()` calls `shutdown_client()`.
+  `shutdown`. `MainWindow.closeEvent()` calls `shutdown_client()`.
 * `core.synth.Synthesizer.lock` (`app.synth`) serializes every `engine.synthesize()` call,
   because the Clone Voice tools and the voice match synthesize too (base sample, preview, bank).
 
@@ -678,7 +663,7 @@ conversion cannot be interrupted), the client kills the worker tree with
 import. Each ready voice becomes an entry right after `normalize` with
 `exclusive_group: "clone"`, so conversion runs before every other DSP effect.
 `EffectsPanel` shows these entries in the Cloned Voices grid and the rest in the
-Effects grid. `ui/app.py` holds the same list object, so
+Effects grid. `core.pipeline` and the panels hold the same list object, so
 `refresh_cloned_voices()` changes it **in place**; never rebind it. After any
 library change call `app.refresh_cloned_voices(select=slug)`, which also re-syncs
 the tiles and the Clone Voice picker.
@@ -733,11 +718,8 @@ comes from the measured epoch times instead.
   torch may drop the GTX 1650.
 * A venv's `python.exe` on Windows is a launcher that starts the real
   interpreter as a child. Always kill with `/T`.
-* Never name a method `_w` on a Tk or CustomTkinter widget subclass. Tk stores
-  the widget's path name in `self._w`, so the method replaces it and drawing
-  fails with "'str' object is not callable".
-* `CustomizationPanel.cleanup()` also runs when the ambiance choice changes, so
-  clone cleanup is called from `AditsVoiceStudioApp.destroy()`, not from there.
+* `CustomizationPanel.cleanup()` deletes ambiance preview files, so clone
+  cleanup is called from `MainWindow.closeEvent()`, not from there.
 
 ### Troubleshooting
 
@@ -781,13 +763,9 @@ To launch the application from source code:
    ```powershell
    .\run.ps1
    ```
-4. The window is the Qt one (PySide6). For one release the classic
-   CustomTkinter window is still there as a fallback (see
-   `docs/pyside6-migration-plan.md`, phase 6); `--qt` is still accepted and
-   changes nothing:
-   ```powershell
-   .\venv_311\Scripts\python.exe tts_app.py --ui ctk
-   ```
+4. The window is the Qt one (PySide6). The classic CustomTkinter window and
+   its `--ui ctk` switch were removed on 2026-10-14; old flags such as `--qt`
+   are ignored.
 
 ### Compiling to Portable EXE
 You can package Adits Voice Studio into a standalone Windows directory:
@@ -806,7 +784,7 @@ You can package Adits Voice Studio into a standalone Windows directory:
    * prunes build-only files (`torch/lib/*.lib`, headers, C sources, pygame tests);
    * writes `LICENSE.txt`, `THIRD_PARTY_NOTICES.txt` and `licenses/` into the app folder;
    * bundles `vc_runtime/` (worker scripts and pinned requirements) as data, but no cloning libraries;
-   * bundles PySide6 next to CustomTkinter (the Qt window is the default; the classic one ships for one more release as a fallback, `--ui ctk`), drops `PySide6/translations` (the app is English), and lists Qt / PySide6 under the LGPL-3.0 in the notices (their packages ship only Qt's commercial license file, which the notice generator skips);
+   * bundles PySide6 (no CustomTkinter since 2026-10-14), drops `PySide6/translations` (the app is English), and lists Qt / PySide6 under the LGPL-3.0 in the notices (their packages ship only Qt's commercial license file, which the notice generator skips);
    * runs `AditsVoiceStudio.exe --selftest` and stops if any offline engine produces no audio, or if the Qt window cannot be built (`qt_window` builds the real window on the Windows platform plugin without showing it, which catches a missing `qwindows.dll`).
 3. Once completed, the distribution is saved in the `./dist/AditsVoiceStudio/` folder (dominated by the CUDA build of PyTorch). Run `AditsVoiceStudio.exe` to launch the portable app.
 

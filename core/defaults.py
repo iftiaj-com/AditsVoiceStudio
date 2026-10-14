@@ -5,8 +5,8 @@ The settings the panels start with, as plain dicts in the shape of their
 get_settings() / get_active_effects(). No UI imports.
 
 The Qt UI uses them for the panels it has not ported yet (see
-docs/pyside6-migration-plan.md). Keep them equal to the CustomTkinter panels'
-starting values: ui/panels/engine_panel.py, customization_panel.py and
+docs/pyside6-migration-plan.md). Keep them equal to the panels' starting
+values: ui/panels/engine_panel.py, customization_panel.py and
 effects_panel.py.
 """
 

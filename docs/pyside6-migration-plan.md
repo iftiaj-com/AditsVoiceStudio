@@ -3,9 +3,9 @@
 Move the Adits Voice Studio UI from CustomTkinter to PySide6 (Qt 6), one phase
 at a time, with the app usable after every phase.
 
-Status, 2026-10-14: Phases 0 to 5 and the first step of phase 6 (Qt is the
-default window) committed on branch `qt-migration`. Left: removing the
-classic window after one release on Qt.
+Status, 2026-10-14: done. Phases 0 to 6 are committed; the classic
+CustomTkinter window (`ui/`) was removed on `dev-tts` without waiting for a
+release on Qt, at the owner's request. `ui_qt/` was then renamed `ui/`.
 
 ---
 
@@ -397,11 +397,24 @@ passes and whose window opens at 100%, 125% and 150% scaling.
 * The installed app and its shortcuts start the EXE with no arguments, so a
   build made from this commit opens the Qt window. (The phase 5 build in
   `dist/` was made before this change and still opens the classic window.)
-* Second step, not done: after one release on Qt, delete `ui/`, the
+* Second step, as planned then: after one release on Qt, delete `ui/`, the
   `customtkinter` requirement and `_REQUIRED` / `--collect-all` entries in
   `build_exe.py`, the fallback flag, and rename `ui_qt/` to `ui/`. Two files
   in `ui/panels/` hold uncommitted edits (search box, footer buttons) that
   are already ported to `ui_qt/`; commit or drop them first.
+
+**Result, second step (2026-10-14, earlier than planned, on request):**
+
+* Deleted `ui/` (13 files), the `--ui ctk` / `ADITS_UI` switch in
+  `tts_app.py`, `customtkinter` in `requirements.txt` and in `build_exe.py`
+  (`_REQUIRED`, `--collect-all`). `core/voice_cloning/voicematch.py` imported
+  the CTk `EnginePanel` for `engine_kind`; it now uses
+  `core.voice_selection.engine_kind`.
+* Then `ui_qt/` was renamed `ui/` (`git mv`, every import updated). In
+  this document, `ui/` before this section means the CustomTkinter package
+  and `ui_qt/` the Qt one.
+* `docs/ui-parity-checklist.md` stays as the record of what the CTk window
+  did; its line numbers point into the deleted files (see git history).
 
 ---
 

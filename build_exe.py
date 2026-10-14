@@ -41,8 +41,7 @@ _REQUIRED = {
     "librosa":        "MeloTTS audio processing",
     "pyttsx3":        "pyttsx3 engine",
     "faster_whisper": "word-level subtitles",
-    "customtkinter":  "GUI (classic window, the default until the Qt one replaces it)",
-    "PySide6":        "Qt GUI (tts_app.py --qt; docs/pyside6-migration-plan.md)",
+    "PySide6":        "GUI (Qt window)",
     "soundfile":      "audio I/O and MP3 export",
     "pyaudio":        "Clone Voice microphone recording",
     "av":             "Clone Voice clip import (M4A, AAC, WebM, WMA...)",
@@ -357,7 +356,7 @@ def build(args):
         "--splash", str(BASE_DIR / "assets" / "splash.png"),
         "--version-file", str(version_file),
     ]
-    for pkg in ("torch", "transformers", "customtkinter", "kokoro", "language_tags",
+    for pkg in ("torch", "transformers", "kokoro", "language_tags",
                 "espeakng_loader", "faster_whisper", "kokoro_onnx", "melo", "g2p_en",
                 "unidic_lite", "unidic", "gruut", "gruut_lang_en", "gruut_lang_es",
                 "gruut_lang_fr", "cached_path", "nltk", "pykakasi", "regex", "jamo",

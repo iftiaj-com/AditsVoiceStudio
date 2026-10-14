@@ -2,8 +2,7 @@
 # Install order matters for Kokoro; see the note at the bottom.
 
 # ── GUI, playback, DSP ──────────────────────────────────────────
-customtkinter>=5.2.0
-PySide6-Essentials>=6.11.2,<6.12  # Qt UI in progress (docs/pyside6-migration-plan.md). LGPL-3.
+PySide6-Essentials>=6.11.2,<6.12  # the window (ui/). LGPL-3.
                                   # Essentials only: QtCore/Gui/Widgets, no Addons modules.
 pygame>=2.5.0
 pydub>=0.25.1

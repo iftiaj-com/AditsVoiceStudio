@@ -7,7 +7,8 @@ matching, the cleanup preview, the clip-length rules and the time
 estimates.
 
 Moved out of ui/panels/clone_voice_group.py (PySide6 migration, phase 4)
-so the CustomTkinter and Qt Clone Voice groups run the same code. Job
+kept apart from the Qt Clone Voice group (it began as shared code for the
+CustomTkinter and Qt windows). Job
 functions run on a worker thread and report through a TaskContext; they
 never touch a widget.
 """

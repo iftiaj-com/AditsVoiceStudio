@@ -10,8 +10,8 @@ dropdown values, e.g.
      "lang": "American English", "voice": "af_heart", "speed": 1.2}
 A *settings* dict is EnginePanel.get_settings().
 
-Moved here from ui/panels/engine_panel.py (PySide6 migration, phase 3); the
-CTk EnginePanel keeps its method names and calls these.
+Moved here from the CustomTkinter engine panel (PySide6 migration, phase 3);
+ui's EnginePanel exposes the same names and calls these.
 """
 
 from core.constants import (EDGE_VOICES, GTTS_LANGUAGES, KOKORO_LANGS, KOKORO_VOICES,

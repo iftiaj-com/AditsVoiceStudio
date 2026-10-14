@@ -1,5 +1,7 @@
 """
-ui/panels/record_dialog.py  –  record a voice clip without leaving the app
+ui/panels/record_dialog.py
+─────────────────────────────
+Record a voice clip without leaving the app (Qt).
 
     🎙 Record a clip                                     [microphone ▾]
     ┌──────────────────── live waveform / preview ─────────────────┐
@@ -9,27 +11,54 @@ ui/panels/record_dialog.py  –  record a voice clip without leaving the app
     after recording:  [▶] ──────●──────── 0:05 / 0:12   (click the waveform to seek)
                       [⟲ Record again] [🗑 Discard]        [✓ Add to clips]
 
-Capture uses PyAudio (PortAudio, default host API) in callback mode; the
-callback only appends raw frames, and a 50 ms Tk timer draws the meter and
-waveform. The take is saved as 16-bit mono WAV in <runtime root>/recordings/
-and handed to on_done(path, seconds). Playback uses pygame Channel 4 from
-an in-memory buffer, so seeking is just "play from here".
+Behavior follows ui/panels/record_dialog.py (see docs/ui-parity-checklist.md,
+"Recorder dialog"). Capture uses PyAudio (PortAudio, default host API) in
+callback mode; the callback only appends raw frames, and a 50 ms QTimer on
+the GUI thread draws the meter and waveform. The take is saved as 16-bit
+mono WAV in out_dir and handed to on_done(path, seconds). Playback uses
+pygame Channel 4 from an in-memory buffer, so seeking is just "play from here".
+
+The level meter and waveform are QWidgets drawn with QPainter. Differences
+from the CTk dialog, none of which change what the user sees:
+
+* The live waveform reads only the last 12 s of frames on each tick (the
+  CTk dialog joined the whole take every 50 ms), and the waveform of a
+  finished take is reduced to one min/max pair per pixel once per size, so
+  a repaint during playback does not rescan the take.
+* While the seek bar is dragged during playback, the time label shows the
+  drag position only. The CTk tick also wrote the playing position into it,
+  so the label flickered between the two.
+* The dialog is not deleted when it closes, so the caller's reference stays
+  valid for isVisible(). Its audio buffers are released at close instead.
+* Esc does nothing, as in the CTk dialog; the close box asks as before.
+* Symbols on buttons and labels are line icons (ui.icons), not emoji.
 """
 
 import os
 import time
 from datetime import datetime
-from tkinter import messagebox
 
-import customtkinter as ctk
 import numpy as np
+from PySide6.QtCore import QLineF, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen
+from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QMessageBox,
+                               QSizePolicy, QVBoxLayout, QWidget)
 
-from core.constants import COLORS, FONTS
-from ui.theme import use_app_icon
+from core import paths
+from core.constants import COLORS
+from ui import theme
+from ui.widgets import SeekSlider
 
+# The constants below match ui/panels/record_dialog.py, which cannot be
+# imported here (it loads CustomTkinter).
 MAX_SECONDS = 600            # stop automatically after 10 minutes
 CHUNK = 1024
 LIVE_WINDOW = 12.0           # seconds of waveform shown while recording
+PLAY_CHANNEL = 4             # pygame channel (1 ambiance, 2 previews, 3 timeline, 4 recorder)
+TICK_MS = 50                 # meter, waveform and playhead refresh
+RECORD_RED = "#CC0000"
+
+TIP_START = "Speak normally in a quiet room. 10 to 25 s is enough for Quick; training needs 3+ minutes."
 
 
 def _fmt(t):
@@ -37,15 +66,154 @@ def _fmt(t):
     return f"{m}:{s:02d}"
 
 
-class RecordDialog(ctk.CTkToplevel):
-    def __init__(self, master, out_dir, on_done=None):
-        super().__init__(master)
-        use_app_icon(self)
-        self.title("Record a clip")
-        self.configure(fg_color=COLORS["bg_dark"])
-        self.geometry("720x430")
-        self.minsize(600, 400)
-        self.transient(master)
+def _to_mono(raw_bytes, channels):
+    """float32 mono from interleaved 16-bit PCM bytes."""
+    raw = np.frombuffer(raw_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels > 1:
+        raw = raw[: len(raw) // channels * channels].reshape(-1, channels).mean(axis=1)
+    return raw
+
+
+class _Meter(QWidget):
+    """Input level bar, -60 to 0 dB (the CTk 260 x 10 canvas)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(260, 10)
+        self._level = -90.0
+
+    def set_level(self, db):
+        self._level = db
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, QColor(COLORS["slider_track"]))
+        frac = min(1.0, max(0.0, (self._level + 60) / 60))
+        color = (COLORS["error"] if self._level > -1 else
+                 COLORS["warning"] if self._level > -6 else COLORS["success"])
+        if frac > 0:
+            p.fillRect(QRectF(0, 0, w * frac, h), QColor(color))
+
+
+class _Wave(QWidget):
+    """Live waveform while recording, and the take with a playhead after it.
+
+    The dialog hands it samples; min/max per pixel column are computed here
+    and cached until the samples or the size change. Mouse presses and drags
+    go to the dialog's seek handler, like the canvas bindings did."""
+
+    def __init__(self, dialog):
+        super().__init__()
+        self._d = dialog
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumHeight(60)
+        self._y = None
+        self._live = False
+        self._window = 1            # samples in LIVE_WINDOW at the current rate
+        self._pos = None            # playhead as a fraction of the take, or None
+        self._msg = "Press Record to start"
+        self._cache_key = None
+        self._cols = None
+        self._msg_font = QFont("Segoe UI")
+        self._msg_font.setPointSize(11)
+
+    def sizeHint(self):
+        return QSize(400, 150)
+
+    def show_message(self, text):
+        self._y, self._pos, self._msg = None, None, text
+        self._cache_key = None
+        self.update()
+
+    def show_live(self, y, window):
+        self._y, self._live, self._window, self._pos = y, True, max(1, window), None
+        self._cache_key = None
+        self.update()
+
+    def show_take(self, y, pos):
+        if y is not self._y or self._live:
+            self._cache_key = None
+        self._y, self._live, self._pos = y, False, pos
+        self.update()
+
+    def set_pos(self, pos):
+        self._pos = pos
+        self.update()
+
+    def _columns(self, w, h):
+        key = (w, h)
+        if key == self._cache_key:
+            return self._cols
+        y = self._y
+        if self._live:
+            cols = int(w * min(1.0, len(y) / self._window))
+        else:
+            cols = int(w)
+        cols = max(1, cols)
+        usable = y[: (len(y) // cols) * cols] if len(y) >= cols else np.pad(y, (0, cols - len(y)))
+        block = usable.reshape(cols, -1)
+        hi, lo = block.max(axis=1), block.min(axis=1)
+        peak = max(0.05, float(np.max(np.abs(y))))
+        amp = h / 2 - 6
+        mid = h / 2
+        top = mid - hi / peak * amp
+        bottom = mid - lo / peak * amp + 1
+        self._cols = (cols, top, bottom)
+        self._cache_key = key
+        return self._cols
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(COLORS["bg_input"]))
+        w, h = max(10, self.width()), max(40, self.height())
+        if self._y is None or self._y.size == 0:
+            p.setPen(QColor(COLORS["text_muted"]))
+            p.setFont(self._msg_font)
+            p.drawText(QRectF(0, 0, w, h), Qt.AlignCenter, self._msg)
+            return
+        cols, top, bottom = self._columns(w, h)
+        if self._live:
+            p.setPen(QPen(QColor(COLORS["error"]), 1))
+            p.drawLines([QLineF(x + 0.5, top[x], x + 0.5, bottom[x]) for x in range(cols)])
+            return
+        pos_x = None if self._pos is None else self._pos * w
+        played, rest = [], []
+        for x in range(cols):
+            (played if pos_x is not None and x <= pos_x else rest).append(
+                QLineF(x + 0.5, top[x], x + 0.5, bottom[x]))
+        if rest:
+            p.setPen(QPen(QColor(COLORS["text_muted"]), 1))
+            p.drawLines(rest)
+        if played:
+            p.setPen(QPen(QColor(COLORS["accent_primary"]), 1))
+            p.drawLines(played)
+        if pos_x is not None:
+            p.setPen(QPen(QColor(COLORS["success"]), 2))
+            p.drawLine(QLineF(pos_x, 0, pos_x, h))
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._d._on_canvas_seek(ev.position().x())
+
+    def mouseMoveEvent(self, ev):
+        if ev.buttons() & Qt.LeftButton:
+            self._d._on_canvas_seek(ev.position().x())
+
+
+class RecordDialog(QDialog):
+    def __init__(self, parent, out_dir, on_done=None):
+        super().__init__(parent)
+        self.setObjectName("recordDialog")
+        self.setWindowTitle("Record a clip")
+        ico = paths.bundle_dir() / "assets" / "adits_voice_studio.ico"
+        if ico.exists():
+            self.setWindowIcon(QIcon(str(ico)))
+        self.resize(720, 430)
+        self.setMinimumSize(600, 400)
+        self.setModal(True)
+        self.setStyleSheet(self._sheet())
         self.out_dir = out_dir
         self.on_done = on_done
         self._pa = None
@@ -63,97 +231,134 @@ class RecordDialog(ctk.CTkToplevel):
         self._play_t0 = None
         self._play_from = 0.0
         self._seeking = False
+        self._devices = {}
+        self._closed = False
 
-        head = ctk.CTkFrame(self, fg_color="transparent")
-        head.pack(fill="x", padx=16, pady=(12, 4))
-        ctk.CTkLabel(head, text="🎙  Record a clip", font=FONTS["subtitle"],
-                     text_color=COLORS["text_primary"]).pack(side="left")
-        self._dev_var = ctk.StringVar(value="")
-        self._dev_menu = ctk.CTkOptionMenu(
-            head, variable=self._dev_var, values=[""], font=FONTS["body_small"], width=260, height=28,
-            fg_color=COLORS["bg_card"], button_color=COLORS["accent_primary"],
-            button_hover_color=COLORS["accent_secondary"], dropdown_fg_color=COLORS["bg_card"],
-            dropdown_hover_color=COLORS["accent_primary"], corner_radius=8)
-        self._dev_menu.pack(side="right")
-        ctk.CTkLabel(head, text="Microphone:", font=FONTS["body_small"],
-                     text_color=COLORS["text_secondary"]).pack(side="right", padx=(0, 6))
+        self._rec_timer = QTimer(self)
+        self._rec_timer.setInterval(TICK_MS)
+        self._rec_timer.timeout.connect(self._tick_record)
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(TICK_MS)
+        self._play_timer.timeout.connect(self._tick_play)
 
-        wrap = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=12, border_width=1,
-                            border_color=COLORS["border"])
-        wrap.pack(fill="both", expand=True, padx=16, pady=8)
-        self.canvas = ctk.CTkCanvas(wrap, bg=COLORS["bg_input"], highlightthickness=0, height=150)
-        self.canvas.pack(fill="both", expand=True, padx=8, pady=(8, 4))
-        self.canvas.bind("<ButtonPress-1>", self._on_canvas_seek)
-        self.canvas.bind("<B1-Motion>", self._on_canvas_seek)
-        self.canvas.bind("<Configure>", lambda e: self._draw())
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 12)
+        root.setSpacing(0)
 
-        meter_row = ctk.CTkFrame(wrap, fg_color="transparent")
-        meter_row.pack(fill="x", padx=8, pady=(0, 8))
-        self._meter = ctk.CTkCanvas(meter_row, bg=COLORS["bg_input"], highlightthickness=0, height=10, width=260)
-        self._meter.pack(side="left", padx=(0, 10))
-        self._time_lbl = ctk.CTkLabel(meter_row, text="0:00", font=("Segoe UI", 15, "bold"),
-                                      text_color=COLORS["text_primary"])
-        self._time_lbl.pack(side="left")
-        self._info = ctk.CTkLabel(meter_row, text="", font=FONTS["body_small"], text_color=COLORS["text_muted"])
-        self._info.pack(side="right")
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 4)
+        title = theme.label("🎙  Record a clip")
+        title.setObjectName("cardTitle")
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(theme.label("Microphone:", secondary=True, small=True))
+        head.addSpacing(6)
+        self._dev_menu = QComboBox()
+        self._dev_menu.setProperty("onCard", True)
+        self._dev_menu.setFont(theme.font("body_small"))
+        self._dev_menu.setFixedWidth(260)
+        head.addWidget(self._dev_menu)
+        root.addLayout(head)
+        root.addSpacing(8)
+
+        wrap = QFrame()
+        wrap.setObjectName("recWrap")
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(8, 8, 8, 8)
+        wl.setSpacing(4)
+        self.canvas = _Wave(self)
+        wl.addWidget(self.canvas, 1)
+        meter_row = QHBoxLayout()
+        meter_row.setContentsMargins(0, 0, 0, 0)
+        meter_row.setSpacing(10)
+        self._meter = _Meter()
+        meter_row.addWidget(self._meter, 0, Qt.AlignVCenter)
+        self._time_lbl = theme.label("0:00")
+        theme.icon_font(self._time_lbl, "Segoe UI", 15, bold=True)
+        meter_row.addWidget(self._time_lbl)
+        meter_row.addStretch(1)
+        self._info = theme.label("", muted=True, small=True)
+        meter_row.addWidget(self._info)
+        wl.addLayout(meter_row)
+        root.addWidget(wrap, 1)
+        root.addSpacing(8)
 
         # record controls
-        self._rec_row = ctk.CTkFrame(self, fg_color="transparent")
-        self._rec_row.pack(fill="x", padx=16, pady=(0, 4))
-        self._rec_btn = ctk.CTkButton(self._rec_row, text="●  Record", font=FONTS["button"], width=130,
-                                      height=34, corner_radius=10, fg_color="#CC0000",
-                                      hover_color=COLORS["error"], command=self._toggle_record)
-        self._rec_btn.pack(side="left")
-        self._tip = ctk.CTkLabel(self._rec_row, text="Speak normally in a quiet room. 10 to 25 s is enough for "
-                                                     "Quick; training needs 3+ minutes.",
-                                 font=FONTS["body_small"], text_color=COLORS["text_muted"],
-                                 wraplength=480, justify="left")
-        self._tip.pack(side="left", padx=12)
+        self._rec_row = QWidget()
+        rr = QHBoxLayout(self._rec_row)
+        rr.setContentsMargins(0, 0, 0, 4)
+        rr.setSpacing(12)
+        self._rec_btn = theme.button("●  Record", theme.ROLE_DANGER)
+        self._rec_btn.setFixedWidth(130)
+        self._rec_btn.clicked.connect(self._toggle_record)
+        rr.addWidget(self._rec_btn)
+        self._tip = theme.label(TIP_START, muted=True, small=True)
+        self._tip.setWordWrap(True)
+        self._tip.setMaximumWidth(480)
+        rr.addWidget(self._tip, 10)   # wraps at 480 px, like wraplength=480
+        rr.addStretch(1)              # takes what is left past 480 px
+        root.addWidget(self._rec_row)
 
         # preview controls (shown after a take)
-        self._play_row = ctk.CTkFrame(self, fg_color="transparent")
-        self._play_btn = ctk.CTkButton(self._play_row, text="▶", font=FONTS["button"], width=40, height=30,
-                                       corner_radius=8, fg_color=COLORS["bg_card"], hover_color=COLORS["success"],
-                                       border_color=COLORS["success"], border_width=1, command=self._toggle_play)
-        self._play_btn.pack(side="left")
-        self._seek_var = ctk.DoubleVar(value=0.0)
-        self._seek = ctk.CTkSlider(self._play_row, from_=0, to=1, variable=self._seek_var, width=420,
-                                   button_color=COLORS["accent_primary"], button_hover_color=COLORS["accent_secondary"],
-                                   progress_color=COLORS["accent_primary"], fg_color=COLORS["slider_track"],
-                                   command=self._on_slider)
-        self._seek.pack(side="left", padx=10)
-        self._seek.bind("<ButtonRelease-1>", lambda e: self._end_slider())
-        self._pos_lbl = ctk.CTkLabel(self._play_row, text="0:00 / 0:00", font=FONTS["body_small"],
-                                     text_color=COLORS["text_secondary"])
-        self._pos_lbl.pack(side="left")
+        self._play_row = QWidget()
+        pr = QHBoxLayout(self._play_row)
+        pr.setContentsMargins(0, 4, 0, 4)
+        pr.setSpacing(10)
+        self._play_btn = theme.button("▶", theme.ROLE_OUTLINE)
+        self._play_btn.setObjectName("recPlay")
+        self._play_btn.setFixedWidth(40)
+        self._play_btn.clicked.connect(self._toggle_play)
+        pr.addWidget(self._play_btn)
+        self._seek = SeekSlider()
+        self._seek.setFixedWidth(420)
+        self._seek.sliderPressed.connect(lambda: self._on_slider(self._seek.seconds()))
+        self._seek.sliderMoved.connect(lambda v: self._on_slider(v / 1000.0))
+        self._seek.sliderReleased.connect(self._end_slider)
+        pr.addWidget(self._seek)
+        self._pos_lbl = theme.label("0:00 / 0:00", secondary=True, small=True)
+        pr.addWidget(self._pos_lbl)
+        pr.addStretch(1)
+        root.addWidget(self._play_row)
 
-        self._done_row = ctk.CTkFrame(self, fg_color="transparent")
-        self._again_btn = self._outline(self._done_row, "⟲  Record again", self._record_again,
-                                        COLORS["accent_primary"], 140)
-        self._again_btn.pack(side="left")
-        self._outline(self._done_row, "🗑  Discard", self._discard, COLORS["error"], 110).pack(side="left", padx=8)
-        ctk.CTkButton(self._done_row, text="✓  Add to clips", font=FONTS["button"], width=150, height=32,
-                      corner_radius=8, fg_color=COLORS["accent_primary"], hover_color=COLORS["accent_secondary"],
-                      command=self._add).pack(side="right")
+        self._done_row = QWidget()
+        dr = QHBoxLayout(self._done_row)
+        dr.setContentsMargins(0, 4, 0, 0)
+        dr.setSpacing(8)
+        self._again_btn = theme.button("⟲  Record again", theme.ROLE_OUTLINE)
+        self._again_btn.setFixedWidth(140)
+        self._again_btn.clicked.connect(self._record_again)
+        dr.addWidget(self._again_btn)
+        self._discard_btn = theme.button("🗑  Discard", theme.ROLE_STOP)
+        self._discard_btn.setFixedWidth(110)
+        self._discard_btn.clicked.connect(self._discard)
+        dr.addWidget(self._discard_btn)
+        dr.addStretch(1)
+        self._add_btn = theme.button("✓  Add to clips", theme.ROLE_PRIMARY)
+        self._add_btn.setFixedWidth(150)
+        self._add_btn.clicked.connect(self._add)
+        dr.addWidget(self._add_btn)
+        root.addWidget(self._done_row)
+        self._play_row.hide()
+        self._done_row.hide()
 
-        self.protocol("WM_DELETE_WINDOW", self._close)
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._release)   # app closing with the recorder open
         self._load_devices()
         self._draw_meter()
-        self.after(150, self._grab)
 
     @staticmethod
-    def _outline(parent, text, cmd, color, width):
-        return ctk.CTkButton(parent, text=text, font=FONTS["button"], width=width, height=32, corner_radius=8,
-                             fg_color=COLORS["bg_card"], hover_color=color, border_color=color, border_width=1,
-                             command=cmd)
-
-    def _grab(self):
-        try:
-            self.lift()
-            self.focus_force()
-            self.grab_set()
-        except Exception:
-            pass
+    def _sheet():
+        c = COLORS
+        return f"""
+QDialog#recordDialog {{ background: {c['bg_dark']}; }}
+QFrame#recWrap {{
+    background: {c['bg_card']}; border: 1px solid {c['border']}; border-radius: 12px;
+}}
+QFrame#recWrap QLabel {{ background: transparent; }}
+QPushButton#recPlay {{ background: {c['bg_card']}; border: 1px solid {c['success']}; padding: 0; }}
+QPushButton#recPlay:hover {{ background: {c['success']}; }}
+"""
 
     # ── devices ────────────────────────────────────────────────────
     def _load_devices(self):
@@ -183,12 +388,17 @@ class RecordDialog(ctk.CTkToplevel):
                                               int(default["maxInputChannels"]))
         names = list(self._devices)
         first = default["name"] if default["name"] in self._devices else names[0]
-        self._dev_menu.configure(values=names)
-        self._dev_var.set(first)
+        self._dev_menu.clear()
+        self._dev_menu.addItems(names)
+        self._dev_menu.setCurrentText(first)
 
     def _fail(self, text):
-        self._tip.configure(text=text, text_color=COLORS["error"])
-        self._rec_btn.configure(state="disabled")
+        self._set_tip(text, COLORS["error"])
+        self._rec_btn.setEnabled(False)
+
+    def _set_tip(self, text, color):
+        self._tip.setText(text)
+        theme.set_color(self._tip, color)
 
     # ── recording ──────────────────────────────────────────────────
     def _toggle_record(self):
@@ -197,10 +407,14 @@ class RecordDialog(ctk.CTkToplevel):
         else:
             self._stop_recording()
 
+    def _on_frames(self, in_data):
+        """PortAudio callback thread: keep the raw block, nothing else."""
+        self._frames.append(in_data)
+
     def _start(self):
         import pyaudio
         self._stop_play()
-        name = self._dev_var.get()
+        name = self._dev_menu.currentText()
         if name not in self._devices:
             return
         index, rate, max_ch = self._devices[name]
@@ -209,7 +423,7 @@ class RecordDialog(ctk.CTkToplevel):
         self._pa = pyaudio.PyAudio()
 
         def callback(in_data, frame_count, time_info, status):
-            self._frames.append(in_data)
+            self._on_frames(in_data)
             return (None, pyaudio.paContinue)
 
         last_err = None
@@ -226,45 +440,59 @@ class RecordDialog(ctk.CTkToplevel):
         if self._stream is None:
             self._pa.terminate()
             self._pa = None
-            messagebox.showerror("Recording failed", f"Could not open {name}:\n{last_err}", parent=self)
+            QMessageBox.critical(self, "Recording failed", f"Could not open {name}:\n{last_err}")
             return
         self._rate = rate
         self._rec_t0 = time.monotonic()
         self._stream.start_stream()
-        self._rec_btn.configure(text="■  Stop", fg_color=COLORS["bg_card"], hover_color=COLORS["border"],
-                                border_color=COLORS["error"], border_width=2)
-        self._dev_menu.configure(state="disabled")
-        self._play_row.pack_forget()
-        self._done_row.pack_forget()
-        self._tip.configure(text="Recording… press Stop when you are done.", text_color=COLORS["error"])
+        self._rec_btn.setText("■  Stop")
+        self._rec_btn.setProperty("role", theme.ROLE_STOP)
+        theme.repolish(self._rec_btn)
+        self._dev_menu.setEnabled(False)
+        self._play_row.hide()
+        self._done_row.hide()
+        self._set_tip("Recording… press Stop when you are done.", COLORS["error"])
+        self._rec_timer.start()
         self._tick_record()
 
     def _samples(self):
         """float32 mono of everything recorded so far."""
         if not self._frames:
             return np.zeros(0, dtype=np.float32)
-        raw = np.frombuffer(b"".join(self._frames), dtype=np.int16).astype(np.float32) / 32768.0
-        if self._channels > 1:
-            raw = raw[: len(raw) // self._channels * self._channels].reshape(-1, self._channels).mean(axis=1)
-        return raw
+        return _to_mono(b"".join(self._frames), self._channels)
+
+    def _live_samples(self):
+        """float32 mono of about the last LIVE_WINDOW seconds (only the frames needed)."""
+        frames = self._frames[:]            # the callback may append meanwhile
+        need = int(LIVE_WINDOW * self._rate) * self._channels * 2
+        tail, size = [], 0
+        for f in reversed(frames):
+            tail.append(f)
+            size += len(f)
+            if size >= need:
+                break
+        if not tail:
+            return np.zeros(0, dtype=np.float32)
+        y = _to_mono(b"".join(reversed(tail)), self._channels)
+        return y[-int(LIVE_WINDOW * self._rate):]
 
     def _tick_record(self):
-        if self._stream is None or not self.winfo_exists():
+        if self._stream is None:
+            self._rec_timer.stop()
             return
         elapsed = time.monotonic() - self._rec_t0
         if self._frames:
             last = np.frombuffer(self._frames[-1], dtype=np.int16).astype(np.float32) / 32768.0
             peak = float(np.max(np.abs(last))) if last.size else 0.0
             self._level = 20 * np.log10(peak + 1e-9)
-        self._time_lbl.configure(text=_fmt(elapsed))
+        self._time_lbl.setText(_fmt(elapsed))
         self._draw_meter()
         self._draw()
         if elapsed >= MAX_SECONDS:
             self._stop_recording()
-            return
-        self.after(50, self._tick_record)
 
-    def _stop_recording(self):
+    def _close_stream(self):
+        self._rec_timer.stop()
         if self._stream is not None:
             try:
                 self._stream.stop_stream()
@@ -273,16 +501,23 @@ class RecordDialog(ctk.CTkToplevel):
                 pass
             self._stream = None
         if self._pa is not None:
-            self._pa.terminate()
+            try:
+                self._pa.terminate()
+            except Exception:
+                pass
             self._pa = None
+
+    def _stop_recording(self):
+        self._close_stream()
         self._level = -90.0
         self._draw_meter()
-        self._rec_btn.configure(text="●  Record", fg_color="#CC0000", hover_color=COLORS["error"], border_width=0)
-        self._dev_menu.configure(state="normal")
+        self._rec_btn.setText("●  Record")
+        self._rec_btn.setProperty("role", theme.ROLE_DANGER)
+        theme.repolish(self._rec_btn)
+        self._dev_menu.setEnabled(True)
         audio = self._samples()
         if audio.size < self._rate * 0.5:
-            self._tip.configure(text="That take was shorter than half a second. Try again.",
-                                text_color=COLORS["warning"])
+            self._set_tip("That take was shorter than half a second. Try again.", COLORS["warning"])
             self._draw()
             return
         self._set_take(audio)
@@ -309,15 +544,15 @@ class RecordDialog(ctk.CTkToplevel):
             tip, color = "The take is very quiet. Move closer or raise the mic gain.", COLORS["warning"]
         else:
             tip, color = "Listen back, then add it to the clips or record again.", COLORS["text_secondary"]
-        self._tip.configure(text=tip, text_color=color)
-        self._info.configure(text=f"{dur:.1f} s · peak {peak:.0f} dBFS · {self._rate // 1000} kHz")
-        self._time_lbl.configure(text=_fmt(dur))
-        self._seek.configure(to=max(0.1, dur))
-        self._seek_var.set(0.0)
+        self._set_tip(tip, color)
+        self._info.setText(f"{dur:.1f} s · peak {peak:.0f} dBFS · {self._rate // 1000} kHz")
+        self._time_lbl.setText(_fmt(dur))
+        self._seek.set_length(max(0.1, dur))
+        self._seek.set_seconds(0.0)
         self._play_from = 0.0
         self._update_pos(0.0)
-        self._play_row.pack(fill="x", padx=16, pady=(4, 4))
-        self._done_row.pack(fill="x", padx=16, pady=(4, 12))
+        self._play_row.show()
+        self._done_row.show()
         self._draw()
 
     # ── preview playback with seek ─────────────────────────────────
@@ -341,51 +576,53 @@ class RecordDialog(ctk.CTkToplevel):
             import pygame
             if self._seg is None or not pygame.mixer.get_init():
                 return
+            if pygame.mixer.get_num_channels() <= PLAY_CHANNEL:
+                pygame.mixer.set_num_channels(PLAY_CHANNEL + 1)
             freq, _size, ch = pygame.mixer.get_init()
             part = self._seg[int(pos * 1000):].set_frame_rate(freq).set_channels(ch).set_sample_width(2)
             self._stop_play()
             self._sound = pygame.mixer.Sound(buffer=part.raw_data)
-            pygame.mixer.Channel(4).play(self._sound)
+            pygame.mixer.Channel(PLAY_CHANNEL).play(self._sound)
             self._play_from, self._play_t0 = pos, time.monotonic()
-            self._play_btn.configure(text="⏸")
+            self._play_btn.setText("⏸")
+            self._play_timer.start()
             self._tick_play()
         except Exception as e:
             print(f"Recording preview failed: {e}")
 
     def _stop_play(self):
         self._play_t0 = None
+        self._play_timer.stop()
         try:
             import pygame
-            if pygame.mixer.get_init():
-                pygame.mixer.Channel(4).stop()
+            if pygame.mixer.get_init() and pygame.mixer.get_num_channels() > PLAY_CHANNEL:
+                pygame.mixer.Channel(PLAY_CHANNEL).stop()
         except Exception:
             pass
-        if hasattr(self, "_play_btn"):
-            self._play_btn.configure(text="▶")
+        self._play_btn.setText("▶")
 
     def _tick_play(self):
-        if self._play_t0 is None or not self.winfo_exists():
+        if self._play_t0 is None:
+            self._play_timer.stop()
             return
         pos = self._position()
         if pos >= self._duration() - 0.01:
             self._play_from = 0.0
             self._stop_play()
             pos = self._duration()
-        if not self._seeking:
-            self._seek_var.set(pos)
-        self._update_pos(pos)
+        if not self._seeking:               # while the bar is dragged, it shows the drag
+            self._seek.set_seconds(pos)
+            self._update_pos(pos)
         self._draw()
-        if self._play_t0 is not None:
-            self.after(50, self._tick_play)
 
     def _update_pos(self, pos):
-        self._pos_lbl.configure(text=f"{_fmt(pos)} / {_fmt(self._duration())}")
+        self._pos_lbl.setText(f"{_fmt(pos)} / {_fmt(self._duration())}")
 
     def _seek_to(self, pos):
         pos = min(max(0.0, pos), self._duration())
         playing = self._play_t0 is not None
         self._play_from = pos
-        self._seek_var.set(pos)
+        self._seek.set_seconds(pos)
         self._update_pos(pos)
         if playing:
             self._play_at(pos)
@@ -401,55 +638,28 @@ class RecordDialog(ctk.CTkToplevel):
 
     def _end_slider(self):
         self._seeking = False
-        self._seek_to(float(self._seek_var.get()))
+        self._seek_to(self._seek.seconds())
 
-    def _on_canvas_seek(self, ev):
+    def _on_canvas_seek(self, x):
         if self._audio is None or self._stream is not None:
             return
-        w = max(1, self.canvas.winfo_width())
-        self._seek_to(ev.x / w * self._duration())
+        w = max(1, self.canvas.width())
+        self._seek_to(x / w * self._duration())
 
     # ── drawing ────────────────────────────────────────────────────
     def _draw_meter(self):
-        m = self._meter
-        m.delete("all")
-        w, h = int(m.cget("width")), int(m.cget("height"))
-        frac = min(1.0, max(0.0, (self._level + 60) / 60))
-        color = COLORS["error"] if self._level > -1 else COLORS["warning"] if self._level > -6 else COLORS["success"]
-        m.create_rectangle(0, 0, w, h, fill=COLORS["slider_track"], outline="")
-        if frac > 0:
-            m.create_rectangle(0, 0, w * frac, h, fill=color, outline="")
+        self._meter.set_level(self._level)
 
     def _draw(self):
-        c = self.canvas
-        c.delete("all")
-        w, h = max(10, c.winfo_width()), max(40, c.winfo_height())
-        mid = h / 2
         recording = self._stream is not None
-        y = self._samples() if recording else self._audio
+        y = self._live_samples() if recording else self._audio
         if y is None or y.size == 0:
-            c.create_text(w / 2, mid, text="Press ● Record to start" if not recording else "Listening…",
-                          fill=COLORS["text_muted"], font=("Segoe UI", 11))
+            self.canvas.show_message("Press Record to start" if not recording else "Listening…")
             return
         if recording:                         # scrolling window of the last LIVE_WINDOW seconds
-            n = int(LIVE_WINDOW * self._rate)
-            y = y[-n:]
-            cols = int(w * min(1.0, len(y) / n))
+            self.canvas.show_live(y, int(LIVE_WINDOW * self._rate))
         else:
-            cols = int(w)
-        cols = max(1, cols)
-        usable = y[: (len(y) // cols) * cols] if len(y) >= cols else np.pad(y, (0, cols - len(y)))
-        block = usable.reshape(cols, -1)
-        hi, lo = block.max(axis=1), block.min(axis=1)
-        peak = max(0.05, float(np.max(np.abs(y))))
-        amp = h / 2 - 6
-        pos_x = None if recording else self._position() / max(1e-9, self._duration()) * w
-        for x in range(cols):
-            col = COLORS["error"] if recording else (COLORS["accent_primary"] if pos_x is not None and x <= pos_x
-                                                     else COLORS["text_muted"])
-            c.create_line(x, mid - hi[x] / peak * amp, x, mid - lo[x] / peak * amp + 1, fill=col)
-        if pos_x is not None:
-            c.create_line(pos_x, 0, pos_x, h, fill=COLORS["success"], width=2)
+            self.canvas.show_take(y, self._position() / max(1e-9, self._duration()))
 
     # ── finish ─────────────────────────────────────────────────────
     def _record_again(self):
@@ -463,11 +673,11 @@ class RecordDialog(ctk.CTkToplevel):
         self._path = None
         self._audio = None
         self._seg = None
-        self._play_row.pack_forget()
-        self._done_row.pack_forget()
-        self._info.configure(text="")
-        self._time_lbl.configure(text="0:00")
-        self._tip.configure(text="Take discarded. Press ● Record to try again.", text_color=COLORS["text_muted"])
+        self._play_row.hide()
+        self._done_row.hide()
+        self._info.setText("")
+        self._time_lbl.setText("0:00")
+        self._set_tip("Take discarded. Press Record to try again.", COLORS["text_muted"])
         self._draw()
 
     def _add(self):
@@ -477,30 +687,42 @@ class RecordDialog(ctk.CTkToplevel):
         self._added = True
         if self.on_done:
             self.on_done(self._path, self._duration())
-        self.destroy()
+        self._release()
+        self.accept()
 
-    def _close(self):
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:       # the CTk dialog ignores Esc too
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def reject(self):
+        """The close box (QDialog.closeEvent calls this): ask before dropping a take."""
         if self._stream is not None:
             self._stop_recording()
         if self._path and not self._added:
-            if not messagebox.askyesno("Discard recording?", "This take has not been added to the clips. "
-                                                             "Discard it?", parent=self):
+            answer = QMessageBox.question(self, "Discard recording?",
+                                          "This take has not been added to the clips. Discard it?",
+                                          QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
                 return
             if os.path.exists(self._path):
                 os.remove(self._path)
-        self.destroy()
+        self._release()
+        super().reject()
 
-    def destroy(self):
-        self._stop_play()
-        self._sound = None
-        if self._stream is not None:
-            try:
-                self._stream.stop_stream()
-                self._stream.close()
-            except Exception:
-                pass
-            self._stream = None
-        if self._pa is not None:
-            self._pa.terminate()
-            self._pa = None
-        super().destroy()
+    def _release(self):
+        """Stop audio and the microphone and free the take's buffers (the CTk destroy())."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._stop_play()
+            self._sound = None
+            self._close_stream()
+            self._seg = None
+            self._audio = None
+            self._frames = []
+            self.canvas.show_message("")
+        except RuntimeError:
+            pass                            # widgets already deleted at app exit

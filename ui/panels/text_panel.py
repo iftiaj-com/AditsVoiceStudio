@@ -1,49 +1,45 @@
 """
 ui/panels/text_panel.py
-────────────────────────
-Text input card — textarea + live character counter.
+──────────────────────────
+Text input card (Qt): text box, live character count, footer edit buttons,
++ menu (import captions, transcribe audio or video), 🎤 dictation, and the
+media strip with player and transcription progress.
 
-    📝 Text Input                                   [🎤] [+]
-    ┌ text box ─────────────────────────────────────────────┐
-    └───────────────────────────────────────────────────────┘
-    ┌ [▶] interview.mp4                      1:02 / 3:45 [✖] ┐   media strip,
-    │ ━━━━━━━━━━━●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ │   shown after
-    │ ▬▬▬▬▬▬ progress ▬▬▬▬▬▬                     [✖ Cancel] │   Transcribe
-    │ Transcribing... 42%                                    │
-    └───────────────────────────────────────────────────────┘
-    [Copy] [Paste] [Paste & Replace] [Clear] [↶] [↷]    1,234 characters
+Behavior follows ui/panels/text_panel.py (see docs/ui-parity-checklist.md,
+"Text Input panel"), with one deliberate change:
 
-+ opens a menu: Import captions or text (core.captions), and Transcribe
-audio or video (core.subtitles.transcribe_file). 🎤 (live dictation) is not
-built yet.
+* Live dictation text. The CTk box shows the phrase still being spoken as
+  gray text inside the box, written with undo switched off. Qt's
+  QTextDocument clears its whole undo history when undo is switched off, so
+  here the phrase in progress shows in a gray line under the box instead.
+  Each finished phrase is written into the box as its own undo step, as before.
 
-Imported text replaces the box when it is empty or still holds SAMPLE_TEXT.
-When it holds the user's own text, a prompt asks Replace / Append / Cancel.
-Either way the change is one undo step, so Ctrl+Z brings the old text back.
-The footer buttons work the same way: Paste adds the clipboard after the
-user's text (or replaces the sample), Paste & Replace and Clear replace it,
-and each is one undo step. ↶ / ↷ are greyed out when there is nothing to undo.
-
-Transcription runs on a thread and adds each Whisper segment to the box as it
-arrives; the box is read-only until it ends. Cancel keeps the text so far.
-The strip's player decodes the file on its first ▶ and plays it on pygame
-channel MEDIA_PLAY_CHANNEL.
+Undo steps: every replace, append, paste, clear and dictated phrase is one
+edit block. A transcription is one undo step too: the first change opens it
+and each segment joins it (QTextCursor.joinPreviousEditBlock), so Ctrl+Z
+removes the whole transcription and brings the old text back.
 """
 import os
 import threading
 import time
-import tkinter as tk
-from tkinter import filedialog, messagebox
 
-import customtkinter as ctk
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtGui import QTextCursor
+from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QSizePolicy)
+
 from core import captions
 from core.audio_io import AUDIO_EXTENSIONS
-from core.constants import COLORS, FONTS
-from ui.panels.clone_voice_group import _Tip
-from ui.theme import styled_slider, use_app_icon
+from core.constants import COLORS
+from ui import theme
+from ui.bridge import ui
+from ui.widgets import SeekSlider, ask_choice
 
+# The constants below match ui/panels/text_panel.py, which cannot be imported
+# here (it loads CustomTkinter). Phase 6 removes the CTk copy.
 MIC_TIP = ("Dictate: talk and your words are typed at the cursor, a phrase at a time. "
            "Click again or press Esc to stop. English only.")
+MIC_TIP_ON = "Stop dictation (Esc). Words already heard are still written."
 DICT_STATES = {                     # Dictation state -> (title bar text, color key)
     "loading": ("Loading speech model…", "text_muted"),
     "listening": ("● Listening", "error"),
@@ -51,11 +47,8 @@ DICT_STATES = {                     # Dictation state -> (title bar text, color 
     "writing": ("✎ Writing…", "text_secondary"),
     "finishing": ("Finishing…", "text_muted"),
 }
-LIVE_TAG = "dict_live"              # gray text of the phrase still being spoken
 MEDIA_PLAY_CHANNEL = 7             # channels 1 to 6: ambiance, previews, timeline, recorder, analyzer, clips
-MEDIA_TYPES = [("Audio and video", " ".join("*" + e for e in AUDIO_EXTENSIONS)), ("All files", "*.*")]
 
-# Shown in the text box at startup, so a first Generate has something to speak.
 SAMPLE_TEXT = (
     "I feel that it has become such a big challenge in today's world because there's so much "
     "data available, social media available, and you get instant feedback, right? So I think in "
@@ -69,260 +62,198 @@ SAMPLE_TEXT = (
     "way, that if we choose to make something not like that, it really stands out."
 )
 
-CAPTION_TYPES = [
-    ("Captions and text", " ".join("*" + e for e in captions.IMPORT_EXTENSIONS)),
-    ("Captions", " ".join("*" + e for e in captions.CAPTION_EXTENSIONS)),
-    ("Text", "*.txt"),
-    ("All files", "*.*"),
-]
+
+def _filter(name, exts):
+    return f"{name} ({' '.join('*' + e for e in exts)})"
 
 
-def _icon_btn(parent, text, command, font, state="normal"):
-    """A small outlined square button for the card's title bar."""
-    return ctk.CTkButton(parent, text=text, width=32, height=28, corner_radius=8, font=font,
-                         fg_color="transparent", hover_color=COLORS["bg_input"],
-                         text_color=COLORS["text_primary"], border_width=1,
-                         border_color=COLORS["border"], command=command, state=state)
+CAPTION_FILTER = ";;".join([
+    _filter("Captions and text", captions.IMPORT_EXTENSIONS),
+    _filter("Captions", captions.CAPTION_EXTENSIONS),
+    "Text (*.txt)",
+    "All files (*.*)",
+])
+MEDIA_FILTER = ";;".join([_filter("Audio and video", AUDIO_EXTENSIONS), "All files (*.*)"])
 
 
-class _ChoiceDialog(ctk.CTkToplevel):
-    """A small modal question with one button per choice. .result is the
-    chosen value, or None for Cancel, Esc or the close box."""
+def _clock(seconds):
+    s = int(max(0.0, seconds or 0.0))
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
 
-    def __init__(self, master, title, message, choices, default=None):
-        super().__init__(master)
-        self.result = None
-        self.withdraw()
-        self.title(title)
-        self.resizable(False, False)
-        self.configure(fg_color=COLORS["bg_card"])
-        self.transient(master)
-        use_app_icon(self)
-        ctk.CTkLabel(self, text=message, font=FONTS["body"], text_color=COLORS["text_primary"],
-                     justify="left", anchor="w", wraplength=380).pack(fill="x", padx=20, pady=(18, 14))
-        row = ctk.CTkFrame(self, fg_color="transparent")
-        row.pack(fill="x", padx=20, pady=(0, 16))
-        for label, value in reversed(choices):
-            primary = value == default
-            ctk.CTkButton(row, text=label, width=96, height=30, corner_radius=8, font=FONTS["button"],
-                          fg_color=COLORS["accent_primary"] if primary else "transparent",
-                          hover_color=COLORS["accent_secondary"] if primary else COLORS["bg_input"],
-                          border_width=0 if primary else 1, border_color=COLORS["border"],
-                          text_color=COLORS["text_primary"],
-                          command=lambda v=value: self._done(v)).pack(side="right", padx=(8, 0))
-        self.bind("<Escape>", lambda e: self._done(None))
-        if default is not None:
-            self.bind("<Return>", lambda e: self._done(default))
-        self.protocol("WM_DELETE_WINDOW", lambda: self._done(None))
-        # centre over the main window
-        self.update_idletasks()
-        top = master.winfo_toplevel()
-        x = top.winfo_rootx() + (top.winfo_width() - self.winfo_reqwidth()) // 2
-        y = top.winfo_rooty() + (top.winfo_height() - self.winfo_reqheight()) // 3
-        self.geometry(f"+{max(0, x)}+{max(0, y)}")
-        self.deiconify()
-        self.after(50, self._grab)
 
-    def _grab(self):
-        try:
-            self.lift()
-            self.focus_force()
-            self.grab_set()
-        except tk.TclError:
-            pass
+class _EscFilter(QObject):
+    """Esc in the text box stops dictation."""
 
-    def _done(self, value):
-        self.result = value
-        try:
-            self.grab_release()
-        except tk.TclError:
-            pass
-        self.destroy()
+    def __init__(self, on_esc):
+        super().__init__()
+        self._on_esc = on_esc
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+            self._on_esc()
+            return True
+        return False
 
 
 class TextPanel:
-    def __init__(self, parent, row=None):
-        frame = ctk.CTkFrame(
-            parent, fg_color=COLORS["bg_card"],
-            corner_radius=14, border_width=1, border_color=COLORS["border"]
-        )
-        if row is not None:
-            frame.grid(row=row, column=0, sticky="ew", padx=24, pady=6)
-            pack_fill = "x"
-            pack_expand = False
-        else:
-            frame.pack(fill="both", expand=True, padx=16, pady=(14, 6))
-            pack_fill = "both"
-            pack_expand = True
-        tb_height = 140
-        self.frame = frame
+    def __init__(self):
+        self.frame, lay = theme.card()
         self._last_dir = None
         self._media_dir = None
         self._job = None                # running transcription: {"cancel", "prev_text", "prev_end", "added"}
         self._dictation = None          # core.dictation.Dictation from 🎤 until it reports "stopped"
-        # media strip player: the file, its decoded audio and the play position
+        self._edit_base = None          # undo steps before the open transcription edit, or None
+        self._count_pending = False
+        # media strip player
         self._media_path = None
         self._media_dur = 0.0
-        self._pl_seg = None             # AudioSegment in the mixer's format, decoded on first ▶
+        self._pl_seg = None
         self._pl_sound = None
-        self._pl_from = 0.0             # position (s) playback starts from / was paused at
-        self._pl_t0 = None              # monotonic time playback started; None when stopped
+        self._pl_from = 0.0
+        self._pl_t0 = None
         self._pl_seeking = False
         self._pl_loading = False
+        self._pl_timer = QTimer()           # moves the bar and time while playing
+        self._pl_timer.setInterval(100)
+        self._pl_timer.timeout.connect(self._media_tick)
 
-        # Title bar: title on the left, 🎤 and + on the right.
-        head = ctk.CTkFrame(frame, fg_color="transparent")
-        head.pack(fill="x", padx=16, pady=(12, 8))
-        ctk.CTkLabel(
-            head, text="📝  Text Input",
-            font=FONTS["subtitle"],
-            text_color=COLORS["text_primary"],
-        ).pack(side="left")
-        self._add_btn = _icon_btn(head, "+", self._open_add_menu, ("Segoe UI", 18, "bold"))
-        self._add_btn.pack(side="right")
-        _Tip(self._add_btn, "Import captions or a text file, or transcribe an audio or video file.")
-        self._mic_btn = _icon_btn(head, "🎤", self._toggle_dictation, ("Segoe UI Emoji", 13))
-        self._mic_btn.pack(side="right", padx=(0, 6))
-        self._mic_tip = _Tip(self._mic_btn, MIC_TIP)
-        self._dict_label = ctk.CTkLabel(head, text="", font=FONTS["body_small"],
-                                        text_color=COLORS["text_muted"])
-        self._dict_label.pack(side="right", padx=(0, 8))
+        # Title bar: title on the left, state label, 🎤 and + on the right.
+        head = QHBoxLayout()
+        title = theme.label("📝  Text Input")
+        title.setObjectName("cardTitle")
+        head.addWidget(title)
+        head.addStretch(1)
+        self._dict_label = theme.label("", small=True)
+        head.addWidget(self._dict_label)
+        self._mic_btn = theme.button("🎤", theme.ROLE_ICON, MIC_TIP)
+        self._mic_btn.clicked.connect(self._toggle_dictation)
+        head.addWidget(self._mic_btn)
+        self._add_btn = theme.button("+", theme.ROLE_ICON,
+                                     "Import captions or a text file, or transcribe an audio or video file.")
+        self._menu = QMenu(self._add_btn)
+        self._act_import = self._menu.addAction("Import captions or text…", self._import_captions)
+        self._act_transcribe = self._menu.addAction("Transcribe audio or video…", self._transcribe_media)
+        self._add_btn.clicked.connect(self._open_add_menu)
+        head.addWidget(self._add_btn)
+        lay.addLayout(head)
 
-        self.text_input = ctk.CTkTextbox(
-            frame, height=tb_height, font=FONTS["mono"],
-            fg_color=COLORS["bg_input"],
-            text_color=COLORS["text_primary"],
-            border_color=COLORS["border"], border_width=1,
-            corner_radius=10, wrap="word",
-            undo=True, autoseparators=True, maxundo=-1,
-        )
-        self.text_input.pack(fill=pack_fill, expand=pack_expand, padx=16, pady=(0, 4))
-        self.text_input.insert("1.0", SAMPLE_TEXT)
-        self.text_input.edit_reset()        # Ctrl+Z must not remove the sample itself
-        self.text_input.edit_modified(False)    # so the first edit sends <<Modified>>
+        self.text_input = QPlainTextEdit()
+        self.text_input.setFont(theme.font("mono"))
+        self.text_input.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.text_input.setMinimumHeight(140)
+        self.text_input.setPlainText(SAMPLE_TEXT)       # also clears undo: Ctrl+Z must not remove the sample
+        lay.addWidget(self.text_input, 1)
+        self._esc = _EscFilter(self._stop_dictation)
+        self.text_input.installEventFilter(self._esc)
+
+        # The phrase still being spoken, gray, under the box (see module docstring).
+        self._live = theme.label("", muted=True)
+        self._live.setFont(theme.font("mono"))
+        self._live.setWordWrap(True)
+        self._live.hide()
+        lay.addWidget(self._live)
+
+        self._build_media_strip(lay)
 
         # Footer: edit buttons on the left, character count on the right.
-        foot = ctk.CTkFrame(frame, fg_color="transparent")
-        foot.pack(fill="x", padx=16, pady=(2, 10))
-        self._foot = foot
-        self._copy_btn = self._foot_btn("Copy", self._copy_all, "Copy all the text.")
-        self._foot_btn("Paste", self._paste_append,
+        foot = QHBoxLayout()
+        foot.setSpacing(6)
+        self._copy_btn = self._foot_btn(foot, "Copy", self._copy_all, "Copy all the text.")
+        self._foot_btn(foot, "Paste", self._paste_append,
                        "Paste the copied text after yours (or in place of the sample).")
-        self._foot_btn("Paste & Replace", self._paste_replace, "Replace all the text with the copied text.")
-        self._foot_btn("Clear", self._clear_all, "Clear the box. Undo brings the text back.")
-        self._undo_btn = self._foot_btn("↶", lambda: self._tb.event_generate("<<Undo>>"), "Undo (Ctrl+Z)",
-                                        icon=True, padx=(8, 0))
-        self._redo_btn = self._foot_btn("↷", lambda: self._tb.event_generate("<<Redo>>"), "Redo (Ctrl+Y)",
-                                        icon=True)
-        self._char_label = ctk.CTkLabel(
-            foot, text="0 characters",
-            font=FONTS["body_small"],
-            text_color=COLORS["text_muted"],
-        )
-        self._char_label.pack(side="right", padx=(8, 4))
-        self._count_job = None
-        # Count on any change (typing, paste, drag-and-drop, the buttons), once per idle.
-        self._tb.bind("<<Modified>>", self._on_modified, add="+")
-        self._tb.bind("<<UndoStack>>", lambda e: self._update_undo_buttons(), add="+")
-        self.text_input.bind("<Escape>", lambda e: self._stop_dictation())
-        self._tb.tag_configure(LIVE_TAG, foreground=COLORS["text_muted"])
-        # Live text is kept out of the undo history; take it out before an undo
-        # so the history's positions still match the text.
-        self._tb.bind("<<Undo>>", lambda e: self._clear_live(), add="+")
-        self._build_media_strip(frame)
+        self._foot_btn(foot, "Paste & Replace", self._paste_replace, "Replace all the text with the copied text.")
+        self._foot_btn(foot, "Clear", self._clear_all, "Clear the box. Undo brings the text back.")
+        foot.addSpacing(2)
+        self._undo_btn = self._foot_btn(foot, "↶", self.text_input.undo, "Undo (Ctrl+Z)", icon=True)
+        self._redo_btn = self._foot_btn(foot, "↷", self.text_input.redo, "Redo (Ctrl+Y)", icon=True)
+        foot.addStretch(1)
+        self._char_label = theme.label("0 characters", muted=True, small=True)
+        foot.addWidget(self._char_label)
+        lay.addLayout(foot)
+
+        self.text_input.undoAvailable.connect(self._undo_btn.setEnabled)
+        self.text_input.redoAvailable.connect(self._redo_btn.setEnabled)
+        self._undo_btn.setEnabled(False)
+        self._redo_btn.setEnabled(False)
+        # Count on any change (typing, paste, drag-and-drop, the buttons), once per event-loop turn.
+        self.text_input.textChanged.connect(self._schedule_count)
         self._update()
-        self._update_undo_buttons()
 
-    def _foot_btn(self, text, command, tip, icon=False, padx=(0, 6)):
-        """A small outlined button in the footer row, packed from the left."""
-        font = ("Segoe UI Symbol", 17, "bold") if icon else FONTS["body_small"]
-        btn = ctk.CTkButton(self._foot, text=text, width=30 if icon else 44, height=26, corner_radius=7,
-                            font=font, fg_color="transparent", hover_color=COLORS["bg_input"],
-                            text_color=COLORS["text_primary"], text_color_disabled=COLORS["text_muted"],
-                            border_width=1, border_color=COLORS["border"], command=command)
-        btn.pack(side="left", padx=padx)
-        _Tip(btn, tip)
+    def _foot_btn(self, foot, text, command, tip, icon=False):
+        btn = theme.button(text, theme.ROLE_GHOST, tip, small=True)
+        if icon:
+            btn.setFixedWidth(30)
+        btn.clicked.connect(command)
+        foot.addWidget(btn)
         return btn
-    def _build_media_strip(self, frame):
-        """Player and transcription progress for an audio or video file; packed when used."""
-        strip = ctk.CTkFrame(frame, fg_color=COLORS["bg_input"], corner_radius=10,
-                             border_width=1, border_color=COLORS["border"])
-        strip.columnconfigure(1, weight=1)
+
+    def _build_media_strip(self, lay):
+        """Player and transcription progress for an audio or video file; shown when used."""
+        strip = QFrame()
+        strip.setObjectName("strip")
+        g = QGridLayout(strip)
+        g.setContentsMargins(8, 8, 8, 8)
+        g.setHorizontalSpacing(6)
+        g.setVerticalSpacing(4)
+        g.setColumnStretch(1, 1)
         self._strip = strip
-        self._pl_btn = ctk.CTkButton(strip, text="▶", font=FONTS["button"], width=38, height=26,
-                                     corner_radius=6, fg_color=COLORS["accent_primary"],
-                                     hover_color=COLORS["accent_secondary"], command=self._on_media_play)
-        self._pl_btn.grid(row=0, column=0, padx=(8, 8), pady=(8, 0))
-        _Tip(self._pl_btn, "Play or pause the file. Drag the bar below to jump.")
-        self._media_name = ctk.CTkLabel(strip, text="", font=FONTS["body_small"],
-                                        text_color=COLORS["text_primary"], anchor="w")
-        self._media_name.grid(row=0, column=1, sticky="ew", pady=(8, 0))
-        self._pl_time = ctk.CTkLabel(strip, text="0:00 / 0:00", font=FONTS["body_small"],
-                                     text_color=COLORS["text_muted"], anchor="e")
-        self._pl_time.grid(row=0, column=2, sticky="e", padx=(6, 4), pady=(8, 0))
-        close = ctk.CTkButton(strip, text="✖", width=26, height=26, corner_radius=6, font=FONTS["body_small"],
-                              fg_color="transparent", hover_color=COLORS["bg_card"],
-                              text_color=COLORS["text_secondary"], command=self._close_media)
-        close.grid(row=0, column=3, padx=(0, 8), pady=(8, 0))
-        _Tip(close, "Close the player. A running transcription stops and keeps its text.")
-        self._pl_seek_var = ctk.DoubleVar(value=0.0)
-        self._pl_seek = styled_slider(strip, self._pl_seek_var, 0, 1, width=100, command=self._on_media_slide)
-        self._pl_seek.grid(row=1, column=0, columnspan=4, sticky="ew", padx=10, pady=(6, 4))
-        self._pl_seek.bind("<ButtonRelease-1>", lambda e: self._media_seek(self._pl_seek_var.get()), add="+")
+        self._pl_btn = theme.button("▶", theme.ROLE_PRIMARY,
+                                    "Play or pause the file. Drag the bar below to jump.")
+        self._pl_btn.setFixedWidth(38)
+        self._pl_btn.clicked.connect(self._on_media_play)
+        g.addWidget(self._pl_btn, 0, 0)
+        self._media_name = theme.label("", small=True)
+        self._media_name.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        g.addWidget(self._media_name, 0, 1)
+        self._pl_time = theme.label("0:00 / 0:00", muted=True, small=True)
+        g.addWidget(self._pl_time, 0, 2)
+        close = theme.button("✖", theme.ROLE_ICON,
+                             "Close the player. A running transcription stops and keeps its text.")
+        close.clicked.connect(self._close_media)
+        g.addWidget(close, 0, 3)
 
-        job = ctk.CTkFrame(strip, fg_color="transparent")
-        job.grid(row=2, column=0, columnspan=4, sticky="ew", padx=10, pady=(2, 0))
-        job.columnconfigure(0, weight=1)
-        self._job_row = job
-        self._job_bar = ctk.CTkProgressBar(job, height=6, fg_color=COLORS["slider_track"],
-                                           progress_color=COLORS["accent_primary"], corner_radius=3)
-        self._job_bar.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self._job_bar.set(0)
-        ctk.CTkButton(job, text="✖  Cancel", font=FONTS["button"], fg_color="#CC0000",
-                      hover_color=COLORS["error"], corner_radius=8, height=26, width=90,
-                      command=self._cancel_job).grid(row=0, column=1)
-        self._job_status = ctk.CTkLabel(strip, text="", font=FONTS["body_small"],
-                                        text_color=COLORS["text_secondary"], anchor="w", justify="left")
-        self._job_status.grid(row=3, column=0, columnspan=4, sticky="ew", padx=10, pady=(2, 8))
-        # wrap long status lines to the strip's width (wraplength is in unscaled pixels)
-        strip.bind("<Configure>", lambda e: self._job_status.configure(
-            wraplength=max(100, e.width / strip._get_widget_scaling() - 30)), add="+")
+        self._pl_seek = SeekSlider()
+        self._pl_seek.sliderPressed.connect(self._on_seek_press)
+        self._pl_seek.sliderMoved.connect(lambda v: self._on_media_slide(v / 1000.0))
+        self._pl_seek.sliderReleased.connect(lambda: self._media_seek(self._pl_seek.seconds()))
+        g.addWidget(self._pl_seek, 1, 0, 1, 4)
 
-    def _update(self, _event=None):
-        if self._count_job is not None:
-            self._tb.after_cancel(self._count_job)
-            self._count_job = None
+        self._job_row = QFrame()
+        jr = QHBoxLayout(self._job_row)
+        jr.setContentsMargins(0, 0, 0, 0)
+        self._job_bar = QProgressBar()
+        self._job_bar.setRange(0, 1000)
+        self._job_bar.setTextVisible(False)
+        jr.addWidget(self._job_bar, 1)
+        cancel = theme.button("✖  Cancel", theme.ROLE_DANGER)
+        cancel.setFixedWidth(100)
+        cancel.clicked.connect(self._cancel_job)
+        jr.addWidget(cancel)
+        g.addWidget(self._job_row, 2, 0, 1, 4)
+        self._job_row.hide()
+
+        self._job_status = theme.label("", secondary=True, small=True)
+        self._job_status.setWordWrap(True)
+        g.addWidget(self._job_status, 3, 0, 1, 4)
+        strip.hide()
+        lay.addWidget(strip)
+
+    # ── counting and undo state ────────────────────────────────────
+    def _schedule_count(self):
+        if not self._count_pending:
+            self._count_pending = True
+            QTimer.singleShot(0, self._update)
+
+    def _update(self):
+        self._count_pending = False
         count = len(self.get_text())
-        self._char_label.configure(
-            text=f"{count:,} character{'s' if count != 1 else ''}"
-        )
-
-    def _on_modified(self, _event=None):
-        """Tk sends <<Modified>> once per change of the flag; reset it and
-        count when idle, so a burst of edits is counted once."""
-        tb = self._tb
-        if not tb.edit_modified():
-            return                          # the reset below fires this too
-        tb.edit_modified(False)
-        if self._count_job is None:
-            self._count_job = tb.after_idle(self._update)
-
-    def _update_undo_buttons(self):
-        tb = self._tb
-        for btn, cmd in ((self._undo_btn, "canundo"), (self._redo_btn, "canredo")):
-            try:
-                can = bool(tb.tk.getboolean(tb.tk.call(tb._w, "edit", cmd)))
-            except tk.TclError:
-                can = True
-            btn.configure(state="normal" if can else "disabled")
+        self._char_label.setText(f"{count:,} character{'s' if count != 1 else ''}")
 
     # ── footer buttons ─────────────────────────────────────────────
-    def _clipboard_text(self):
+    @staticmethod
+    def _clipboard_text():
         """The clipboard's text, or None when it holds no text."""
-        try:
-            text = self.frame.clipboard_get()
-        except tk.TclError:
-            return None
+        text = QApplication.clipboard().text()
         return text.replace("\r\n", "\n") or None
 
     def _editable(self):
@@ -330,25 +261,22 @@ class TextPanel:
         if self._job is not None:
             self._set_job_status("Wait for the transcription to finish, or cancel it.", self._job)
             return False
-        self._clear_live()                  # gray dictation text is not part of the text yet
         return True
 
     def _copy_all(self):
         text = self.get_text()
         if not text:
             return
-        self.frame.clipboard_clear()
-        self.frame.clipboard_append(text)
-        self._copy_btn.configure(text="Copied")
-        self.frame.after(1200, lambda: self._copy_btn.configure(text="Copy"))
+        QApplication.clipboard().setText(text)
+        self._copy_btn.setText("Copied")
+        QTimer.singleShot(1200, lambda: self._copy_btn.setText("Copy"))
 
     def _paste_append(self):
         text = self._clipboard_text()
         if text is None or not self._editable():
             return
         # an empty box or the sample is replaced; the user's own text is kept
-        mode = "append" if self.has_own_text() else "replace"
-        self._put(text, mode)
+        self._put(text, "append" if self.has_own_text() else "replace")
 
     def _paste_replace(self):
         text = self._clipboard_text()
@@ -357,29 +285,42 @@ class TextPanel:
         self._put(text, "replace")
 
     def _clear_all(self):
-        if not self._editable() or not self._tb.get("1.0", "end-1c"):
+        if not self._editable() or not self.text_input.toPlainText():
             return
         self._put("", "replace")
-        self.text_input.focus_set()
+        self.text_input.setFocus()
 
-    def _put(self, text, mode):
-        """Replace or append text as one undo step, cursor at its end."""
-        tb = self._tb
-        self._begin_edit(mode)
-        try:
-            tb.insert("end-1c", text)
-            tb.mark_set("insert", "end-1c")
-            tb.see("insert")
-        finally:
-            self._end_edit()
+    def _put(self, text, mode, cursor_at_start=False):
+        """Replace or append text as one undo step; cursor at its end (or the start)."""
+        cur = QTextCursor(self.text_input.document())
+        cur.beginEditBlock()
+        start = self._prepare(cur, mode)
+        cur.insertText(text)
+        cur.endEditBlock()
+        if cursor_at_start:
+            cur.setPosition(start)
+        self.text_input.setTextCursor(cur)
+        self.text_input.ensureCursorVisible()
+        self._update()
+
+    @staticmethod
+    def _prepare(cur, mode):
+        """Inside an edit block: clear the box (replace) or end it with a blank
+        line (append). Leaves cur at the end; returns where new text starts."""
+        if mode == "replace":
+            cur.select(QTextCursor.Document)
+            cur.removeSelectedText()
+        else:
+            cur.movePosition(QTextCursor.End)
+            current = cur.document().toPlainText()
+            trailing = len(current) - len(current.rstrip("\n"))
+            cur.insertText("\n" * max(0, 2 - trailing))
+        cur.movePosition(QTextCursor.End)
+        return cur.position()
 
     def get_text(self) -> str:
-        """The box's text, without gray live dictation (not final yet)."""
-        tb = self._tb
-        live = tb.tag_ranges(LIVE_TAG)
-        if not live:
-            return tb.get("1.0", "end-1c")
-        return tb.get("1.0", live[0]) + tb.get(live[1], "end-1c")
+        """The box's text. (Live dictation text is outside the box in this UI.)"""
+        return self.text_input.toPlainText()
 
     # ── putting text in ────────────────────────────────────────────
     def has_own_text(self) -> bool:
@@ -398,92 +339,71 @@ class TextPanel:
                               "add it after your text, or cancel?")
         if mode is None:
             return False
-        tb = self._tb
-        start = self._begin_edit(mode)
-        try:
-            tb.insert("end-1c", text)
-            tb.mark_set("insert", "1.0" if mode == "replace" else "end-1c")
-            tb.see(start)
-        finally:
-            self._end_edit()
+        self._put(text, mode, cursor_at_start=(mode == "replace"))
         return True
-
-    @property
-    def _tb(self):
-        return self.text_input._textbox         # the tk.Text inside CTkTextbox
 
     def _ask_mode(self, question):
         """"replace" for an empty box or the sample; otherwise ask. None = Cancel."""
         if not self.has_own_text():
             return "replace"
-        top = self.frame.winfo_toplevel()
-        dlg = _ChoiceDialog(top, "Import text", "The text box already has your own text.\n\n" + question,
-                            [("Replace", "replace"), ("Append", "append"), ("Cancel", None)],
-                            default="replace")
-        top.wait_window(dlg)
-        return dlg.result
+        return ask_choice(self.frame.window(), "Import text",
+                          "The text box already has your own text.\n\n" + question,
+                          [("Replace", "replace"), ("Append", "append"), ("Cancel", None)],
+                          default="replace")
 
+    # ── one undo step that stays open while a transcription runs ───
     def _begin_edit(self, mode):
-        """Start one undo step: clear the box (replace) or add a blank line (append).
-        Returns the index new text starts at."""
-        tb = self._tb
-        tb.configure(state="normal", autoseparators=False)
-        tb.edit_separator()
-        if mode == "replace":
-            tb.delete("1.0", "end")
+        doc = self.text_input.document()
+        self._edit_base = doc.availableUndoSteps()
+        cur = QTextCursor(doc)
+        cur.beginEditBlock()
+        self._prepare(cur, mode)
+        cur.endEditBlock()
+
+    def _append_to_edit(self, text):
+        doc = self.text_input.document()
+        cur = QTextCursor(doc)
+        cur.movePosition(QTextCursor.End)
+        if doc.availableUndoSteps() > self._edit_base:
+            cur.joinPreviousEditBlock()     # same undo step as the start of this transcription
         else:
-            current = tb.get("1.0", "end-1c")
-            trailing = len(current) - len(current.rstrip("\n"))
-            tb.insert("end-1c", "\n" * max(0, 2 - trailing))
-        return tb.index("end-1c")
+            cur.beginEditBlock()            # nothing changed yet: open the step now
+        cur.insertText(text)
+        cur.endEditBlock()
 
     def _end_edit(self, revert=False):
-        """Close the undo step; revert=True undoes it (nothing was added)."""
-        tb = self._tb
-        tb.configure(state="normal")
-        tb.edit_separator()
-        if revert:
-            try:
-                tb.edit_undo()
-            except tk.TclError:
-                pass                        # nothing had changed
-        tb.configure(autoseparators=True)
+        """Close the step; revert=True takes it back (nothing was added)."""
+        doc = self.text_input.document()
+        if revert and doc.availableUndoSteps() > self._edit_base:
+            doc.undo()
+        self._edit_base = None
         self._update()
 
     # ── + menu ─────────────────────────────────────────────────────
     def _open_add_menu(self):
-        btn = self._add_btn
-        size = -max(1, round(FONTS["body"][1] * btn._get_widget_scaling()))
-        menu = tk.Menu(btn, tearoff=0, bg=COLORS["bg_card"], fg=COLORS["text_primary"],
-                       activebackground=COLORS["accent_primary"], activeforeground="#FFFFFF",
-                       disabledforeground=COLORS["text_muted"], bd=0, relief="flat",
-                       font=(FONTS["body"][0], size))
         busy = self._job is not None or self._dictation is not None
-        state = "disabled" if busy else "normal"
-        menu.add_command(label="  Import captions or text…", command=self._import_captions, state=state)
-        menu.add_command(label="  Transcribe audio or video…", command=self._transcribe_media, state=state)
-        menu.update_idletasks()
-        x = btn.winfo_rootx() + btn.winfo_width() - menu.winfo_reqwidth()
-        y = btn.winfo_rooty() + btn.winfo_height() + 2
-        try:
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
+        self._act_import.setEnabled(not busy)
+        self._act_transcribe.setEnabled(not busy)
+        btn = self._add_btn
+        pos = btn.mapToGlobal(btn.rect().bottomRight())
+        pos.setX(pos.x() - self._menu.sizeHint().width())
+        pos.setY(pos.y() + 2)
+        self._menu.exec(pos)
 
     def _import_captions(self):
-        top = self.frame.winfo_toplevel()
-        path = filedialog.askopenfilename(parent=top, title="Import captions or text",
-                                          filetypes=CAPTION_TYPES, initialdir=self._last_dir)
+        top = self.frame.window()
+        path, _ = QFileDialog.getOpenFileName(top, "Import captions or text", self._last_dir or "",
+                                              CAPTION_FILTER)
         if not path:
             return
         self._last_dir = os.path.dirname(path)
         try:
             text = captions.load_text(path)
         except captions.CaptionError as e:
-            messagebox.showerror("Import captions or text", str(e), parent=top)
+            QMessageBox.critical(top, "Import captions or text", str(e))
             return
         except OSError as e:
-            messagebox.showerror("Import captions or text", f"Could not open the file:\n{e}", parent=top)
+            QMessageBox.critical(top, "Import captions or text", f"Could not open the file:\n{e}")
             return
         self.put_text(text, os.path.basename(path))
 
@@ -499,17 +419,16 @@ class TextPanel:
             return
         from core.dictation import Dictation
         if not self.has_own_text():
-            # the sample (or blanks) goes at once, as one undo step
-            self._begin_edit("replace")
-            self._end_edit()
-        self.text_input.focus_set()
-        d = Dictation(on_text=lambda t: self._ui(self._place_dictated, t, False),
-                      on_partial=lambda t: self._ui(self._place_dictated, t, True),
-                      on_state=lambda s: self._ui(self._on_dictation_state, d, s),
-                      on_error=lambda m: self._ui(self._on_dictation_error, m))
+            self._put("", "replace")        # the sample (or blanks) goes at once, as one undo step
+        self.text_input.setFocus()
+        d = Dictation(on_text=lambda t: ui(self._place_dictated, t, False),
+                      on_partial=lambda t: ui(self._place_dictated, t, True),
+                      on_state=lambda s: ui(self._on_dictation_state, d, s),
+                      on_error=lambda m: ui(self._on_dictation_error, m))
         self._dictation = d
-        self._mic_btn.configure(fg_color="#CC0000", hover_color=COLORS["error"], border_color="#CC0000")
-        self._mic_tip.text = "Stop dictation (Esc). Words already heard are still written."
+        self._mic_btn.setProperty("recording", True)
+        theme.repolish(self._mic_btn)
+        self._mic_btn.setToolTip(MIC_TIP_ON)
         d.start()
 
     def _stop_dictation(self):
@@ -528,80 +447,62 @@ class TextPanel:
         if d is not self._dictation:
             return
         if state == "stopped":
-            self._clear_live()
+            self._set_live("")
             self._dictation = None
-            self._mic_btn.configure(fg_color="transparent", hover_color=COLORS["bg_input"],
-                                    border_color=COLORS["border"])
-            self._mic_tip.text = MIC_TIP
-            self._dict_label.configure(text="")
+            self._mic_btn.setProperty("recording", False)
+            theme.repolish(self._mic_btn)
+            self._mic_btn.setToolTip(MIC_TIP)
+            self._dict_label.setText("")
             return
         text, color = DICT_STATES.get(state, ("", "text_muted"))
-        self._dict_label.configure(text=text, text_color=COLORS[color])
+        self._dict_label.setText(text)
+        theme.set_color(self._dict_label, COLORS[color])
 
     def _on_dictation_error(self, msg):
-        messagebox.showerror("Dictation", msg, parent=self.frame.winfo_toplevel())
+        QMessageBox.critical(self.frame.window(), "Dictation", msg)
 
-    def _clear_live(self):
-        """Remove the gray live text, outside the undo history. Returns where it was."""
-        tb = self._tb
-        live = tb.tag_ranges(LIVE_TAG)
-        if not live:
-            return None
-        pos = tb.index(live[0])
-        state = tb.cget("state")
-        tb.configure(state="normal", undo=False)
-        tb.delete(live[0], live[1])
-        tb.configure(undo=True, state=state)
-        self._update()
-        return pos
+    def _set_live(self, text):
+        self._live.setText(text)
+        self._live.setVisible(bool(text))
 
     def _place_dictated(self, text, live):
-        """Show a phrase where the dictation is writing: the place of the live
-        text if there is some, else the cursor. live=True writes gray text
-        outside the undo history; live=False writes the final words, one undo
-        step, and puts the cursor after them. A space is added on either side
-        where needed. live with text "" just clears the gray text."""
-        tb = self._tb
-        if tb.cget("state") == "disabled":
+        """live=True: show the phrase in progress under the box ("" hides it).
+        live=False: write the finished phrase at the cursor as one undo step,
+        with a space on either side where needed, and put the cursor after it."""
+        if live:
+            self._set_live(text)
             return
-        pos = self._clear_live() or tb.index("insert")
-        if not text:
+        self._set_live("")
+        if not text or self.text_input.isReadOnly():
             return
-        before = tb.get(f"{pos} -1c", pos) if pos != "1.0" else ""
-        after = tb.get(pos, f"{pos} +1c")
+        doc = self.text_input.document()
+        cur = self.text_input.textCursor()
+        cur.clearSelection()
+        pos = cur.position()
+        before = doc.characterAt(pos - 1) if pos > 0 else ""
+        after = doc.characterAt(pos)
+        before = "" if before in ("", "\x00") else before
+        after = "" if after in ("", "\x00") else after
         lead = "" if (not before or before.isspace()) else " "
         tail = " " if (after and not after.isspace() and after not in ".,;:!?") else ""
-        cursor_here = tb.compare("insert", "==", pos)
-        if live:
-            tb.configure(undo=False)
-            tb.insert(pos, lead + text + tail, (LIVE_TAG,))
-            tb.configure(undo=True)
-            if cursor_here:
-                tb.mark_set("insert", pos)      # typing goes before the gray text
-        else:
-            tb.edit_separator()                 # each phrase is its own undo step
-            tb.insert(pos, lead + text + tail)
-            tb.edit_separator()
-            tb.mark_set("insert", f"{pos} +{len(lead + text)}c")
-        tb.see(f"{pos} +{len(lead + text)}c")
+        cur.beginEditBlock()                # each phrase is its own undo step
+        cur.insertText(lead + text + tail)
+        cur.endEditBlock()
+        cur.setPosition(pos + len(lead + text))
+        self.text_input.setTextCursor(cur)
+        self.text_input.ensureCursorVisible()
         self._update()
 
     # ── transcribe audio or video ──────────────────────────────────
-    def _ui(self, fn, *args):
-        """Run fn on the Tk thread (safe from worker threads)."""
-        try:
-            self.frame.after(0, lambda: fn(*args))
-        except (RuntimeError, tk.TclError):
-            pass   # window already closed
-
     def _transcribe_media(self):
         if self._job is not None or self._dictation is not None:
             return
-        top = self.frame.winfo_toplevel()
-        path = filedialog.askopenfilename(parent=top, title="Transcribe audio or video",
-                                          filetypes=MEDIA_TYPES, initialdir=self._media_dir)
+        top = self.frame.window()
+        path, _ = QFileDialog.getOpenFileName(top, "Transcribe audio or video", self._media_dir or "",
+                                              MEDIA_FILTER)
         if not path:
             return
+        path = os.path.normpath(path)
         self._media_dir = os.path.dirname(path)
         mode = self._ask_mode(f"“{os.path.basename(path)}” will be transcribed into the box. "
                               "Replace your text with it, add it after your text, or cancel?")
@@ -609,14 +510,15 @@ class TextPanel:
             return
         self._open_media(path)
         self._begin_edit(mode)
-        self._tb.see("end-1c")
-        self._tb.configure(state="disabled")    # read-only while segments arrive
+        self.text_input.moveCursor(QTextCursor.End)
+        self.text_input.setReadOnly(True)    # read-only while segments arrive
+        theme.repolish(self.text_input)
         cancel = threading.Event()
         job = {"cancel": cancel, "prev_text": "", "prev_end": None, "added": False}
         self._job = job
-        self._mic_btn.configure(state="disabled")
-        self._job_bar.set(0)
-        self._job_row.grid()
+        self._mic_btn.setEnabled(False)
+        self._job_bar.setValue(0)
+        self._job_row.show()
         self._set_job_status("Starting...")
 
         def work():
@@ -624,20 +526,21 @@ class TextPanel:
             try:
                 info = transcribe_file(
                     path, check_cancel=cancel.is_set,
-                    on_segment=lambda s, e, t, d: self._ui(self._add_segment, job, s, e, t, d),
-                    status_cb=lambda m: self._ui(self._set_job_status, m, job))
-                self._ui(self._job_done, job, info, None)
+                    on_segment=lambda s, e, t, d: ui(self._add_segment, job, s, e, t, d),
+                    status_cb=lambda m: ui(self._set_job_status, m, job))
+                ui(self._job_done, job, info, None)
             except SubtitleCancelled:
-                self._ui(self._job_done, job, None, "cancelled")
+                ui(self._job_done, job, None, "cancelled")
             except Exception as e:   # noqa: BLE001
                 print(f"Transcription failed: {e}")
-                self._ui(self._job_done, job, None, e)
+                ui(self._job_done, job, None, e)
         threading.Thread(target=work, daemon=True, name="transcribe-file").start()
 
     def _set_job_status(self, text, job=None, color=None):
         if job is not None and job is not self._job:
             return
-        self._job_status.configure(text=text, text_color=color or COLORS["text_secondary"])
+        self._job_status.setText(text)
+        theme.set_color(self._job_status, color or COLORS["text_secondary"])
 
     def _add_segment(self, job, start, end, text, duration):
         if job is not self._job:
@@ -652,30 +555,29 @@ class TextPanel:
                 sep = "\n\n"
             else:
                 sep = " "
-            tb = self._tb
-            tb.configure(state="normal")
-            tb.insert("end-1c", sep + text)
-            tb.configure(state="disabled")
-            tb.see("end-1c")
+            self._append_to_edit(sep + text)
+            self.text_input.moveCursor(QTextCursor.End)
+            self.text_input.ensureCursorVisible()
             job["prev_text"], job["prev_end"], job["added"] = text, end, True
             self._update()
         if duration:
             frac = min(1.0, end / duration)
-            self._job_bar.set(frac)
-            self._set_job_status(f"Transcribing... {frac:.0%} ({self._clock(end)} of {self._clock(duration)})")
+            self._job_bar.setValue(round(frac * 1000))
+            self._set_job_status(f"Transcribing... {frac:.0%} ({_clock(end)} of {_clock(duration)})")
 
     def _job_done(self, job, info, error):
         if job is not self._job:
             return
         self._job = None
-        self._mic_btn.configure(state="normal")
-        self._job_row.grid_remove()
+        self._mic_btn.setEnabled(True)
+        self._job_row.hide()
+        self.text_input.setReadOnly(False)
+        theme.repolish(self.text_input)
         self._end_edit(revert=not job["added"])     # nothing found: the old text comes back
         if error == "cancelled":
             self._set_job_status("Stopped. The text so far is kept; Ctrl+Z removes it."
                                  if job["added"] else "Stopped. Your text is unchanged.")
         elif error is not None:
-            # the full error is printed to the log; the strip gets the gist
             why = ("The file may be damaged, or have no sound track."
                    if isinstance(error, ValueError) else str(error).splitlines()[0][:160])
             self._set_job_status(f"⚠  Could not transcribe this file. {why}", color=COLORS["warning"])
@@ -686,7 +588,7 @@ class TextPanel:
             if info is not None and info.duration and not self._media_dur:
                 self._set_media_duration(info.duration)
             lang = f" · language: {info.language}" if info is not None and info.language else ""
-            self._set_job_status(f"Transcribed {self._clock(self._media_dur)}{lang}. "
+            self._set_job_status(f"Transcribed {_clock(self._media_dur)}{lang}. "
                                  "Ctrl+Z puts the old text back.", color=COLORS["success"])
 
     def _cancel_job(self):
@@ -695,31 +597,28 @@ class TextPanel:
             self._set_job_status("Stopping...")
 
     # ── media strip player ─────────────────────────────────────────
-    @staticmethod
-    def _clock(seconds):
-        s = int(max(0.0, seconds or 0.0))
-        return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
-
     def _open_media(self, path):
         self._media_stop()
         self._media_path = path
         self._media_dur = 0.0
         self._pl_seg, self._pl_from = None, 0.0
-        self._media_name.configure(text=os.path.basename(path))
-        self._pl_seek.configure(to=1.0)
-        self._pl_seek_var.set(0.0)
-        self._pl_time.configure(text="0:00 / –")
-        self._strip.pack(fill="x", padx=16, pady=(4, 2), before=self._foot)
+        self._media_name.setText(os.path.basename(path))
+        self._media_name.setToolTip(path)
+        self._pl_seek.set_length(1.0)
+        self._pl_seek.set_seconds(0.0)
+        self._pl_time.setText("0:00 / –")
+        self._job_status.setText("")
+        self._strip.show()
 
     def _close_media(self):
         self._cancel_job()
         self._media_stop()
         self._media_path, self._pl_seg = None, None
-        self._strip.pack_forget()
+        self._strip.hide()
 
     def _set_media_duration(self, seconds):
         self._media_dur = float(seconds)
-        self._pl_seek.configure(to=max(0.1, self._media_dur))
+        self._pl_seek.set_length(max(0.1, self._media_dur))
         self._media_show_pos(self._media_position())
 
     def _media_position(self):
@@ -728,8 +627,8 @@ class TextPanel:
         return min(self._media_dur, self._pl_from + time.monotonic() - self._pl_t0)
 
     def _media_show_pos(self, pos):
-        total = self._clock(self._media_dur) if self._media_dur else "–"
-        self._pl_time.configure(text=f"{self._clock(pos)} / {total}")
+        total = _clock(self._media_dur) if self._media_dur else "–"
+        self._pl_time.setText(f"{_clock(pos)} / {total}")
 
     def _on_media_play(self):
         """▶ plays from the bar's position (from the start once it reached the end); ❚❚ pauses."""
@@ -749,23 +648,25 @@ class TextPanel:
             fmt = None
         if not fmt:
             return
-        # decode off the Tk thread: a long MP3 or MP4 takes a moment
+        # decode off the GUI thread: a long MP3 or MP4 takes a moment
         path, (freq, _size, ch) = self._media_path, fmt
         self._pl_loading = True
-        self._pl_btn.configure(text="…", state="disabled")
+        self._pl_btn.setText("…")
+        self._pl_btn.setEnabled(False)
 
         def load():
             try:
                 from core.audio_io import load_segment
                 seg = load_segment(path).set_frame_rate(freq).set_channels(ch).set_sample_width(2)
-                self._ui(self._media_loaded, path, seg, None)
+                ui(self._media_loaded, path, seg, None)
             except Exception as e:   # noqa: BLE001
-                self._ui(self._media_loaded, path, None, e)
+                ui(self._media_loaded, path, None, e)
         threading.Thread(target=load, daemon=True, name="media-player-load").start()
 
     def _media_loaded(self, path, seg, error):
         self._pl_loading = False
-        self._pl_btn.configure(text="▶", state="normal")
+        self._pl_btn.setText("▶")
+        self._pl_btn.setEnabled(True)
         if path != self._media_path:
             return                          # another file was opened meanwhile
         if error is not None:
@@ -788,7 +689,8 @@ class TextPanel:
             print(f"Media playback failed: {e}")
             return
         self._pl_from, self._pl_t0 = pos, time.monotonic()
-        self._pl_btn.configure(text="❚❚", font=FONTS["body_small"])   # smaller, so the button keeps its width
+        self._pl_btn.setText("❚❚")
+        self._pl_timer.start()
         self._media_tick()
 
     def _media_pause(self):
@@ -798,6 +700,7 @@ class TextPanel:
 
     def _media_stop(self):
         self._pl_t0 = None
+        self._pl_timer.stop()
         try:
             import pygame
             if pygame.mixer.get_init() and pygame.mixer.get_num_channels() > MEDIA_PLAY_CHANNEL:
@@ -805,10 +708,7 @@ class TextPanel:
         except Exception:
             pass
         self._pl_sound = None
-        try:
-            self._pl_btn.configure(text="▶", font=FONTS["button"])
-        except Exception:
-            pass
+        self._pl_btn.setText("▶")
 
     def _media_tick(self):
         if self._pl_t0 is None:
@@ -819,10 +719,11 @@ class TextPanel:
             self._pl_from = 0.0             # next ▶ starts over
             pos = self._media_dur
         if not self._pl_seeking:            # while the bar is dragged, it shows the drag
-            self._pl_seek_var.set(pos)
+            self._pl_seek.set_seconds(pos)
             self._media_show_pos(pos)
-        if self._pl_t0 is not None:
-            self.frame.after(100, self._media_tick)
+
+    def _on_seek_press(self):
+        self._on_media_slide(self._pl_seek.seconds())
 
     def _on_media_slide(self, value):
         self._pl_seeking = True

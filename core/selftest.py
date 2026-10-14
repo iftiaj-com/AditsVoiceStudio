@@ -133,8 +133,8 @@ def run(report_path):
         # built but never shown: fails here if qwindows.dll or a Qt module is
         # missing from the bundle, instead of on the user's first launch.
         from PySide6.QtWidgets import QApplication
-        from ui_qt import bridge, theme
-        from ui_qt.app import MainWindow
+        from ui import bridge, theme
+        from ui.app import MainWindow
         app = QApplication.instance() or QApplication([sys.argv[0]])
         app.setStyle("Fusion")
         app.setStyleSheet(theme.stylesheet())

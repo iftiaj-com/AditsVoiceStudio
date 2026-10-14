@@ -1,5 +1,7 @@
 """
-ui/panels/analyzer_dialog.py  –  "Voice match": the best base voice for the clips
+ui/panels/analyzer_dialog.py
+───────────────────────────────
+"Voice match" (Qt): the best base voice for the clips.
 
 Opened by 🔍 Analyze in Customization → Clone Voice → Create voice. One run:
 
@@ -16,42 +18,68 @@ Opened by 🔍 Analyze in Customization → Clone Voice → Create voice. One ru
      engine voice at the suggested speed, cloned with Seed-VC (the clip is the
      reference). The Results are ranked by how close they sound to the clip,
      minus the same pitch penalty as the shortlist: 1. Best match, 2. and 3.
-     Close match. The bank recordings are only used to shortlist; nothing else
-     is spoken or cloned.
+     Close match.
 
-Each row has two play/stop toggles:
-  ▶ Original  the user's clip as it was measured: trimmed, and cleaned when
-              music removal is on (at most MAX_ANALYSIS_SECONDS)
-  ▶ Result    the clip's words in that voice, cloned, to compare word for word
-and Apply, which selects engine, voice and a speed that matches the clip's pace
-(EnginePanel.apply_voice_selection), hands the Result to on_applied (a Quick
-voice created next keeps its first 10 s as the saved preview) and closes the
-window. The user can still change the controls afterwards.
+Each row has two play/stop toggles (▶ Original, the clip as measured, and
+▶ Result) and Apply, which selects engine, voice and speed
+(EnginePanel.apply_voice_selection), hands the Result to on_applied and
+closes the window.
+
+Behavior follows ui/panels/analyzer_dialog.py (see docs/ui-parity-checklist.md,
+"Voice match dialog"). The window is not modal, as in the CTk dialog: it is
+owned by the main window (so it stays on top of it), raised and focused.
+
+Differences, forced by Qt:
+
+* The ranked rows sit in a QScrollArea that shows no frame or scrollbar while
+  they fit. A Qt layout grows the window's minimum size to fit its contents
+  instead of clipping them as Tk's pack does, so without it the 640x480
+  minimum could not hold.
+* Esc does nothing (QDialog would close on Esc; the CTk dialog has no Esc
+  binding). Close and the close box close it.
+* The dialog is deleted when it closes (WA_DeleteOnClose), like a destroyed
+  CTkToplevel. Calls that the worker thread queues after that are dropped
+  (the _closed flag), as the CTk _ui() did with winfo_exists().
 """
-
 import os
 import shutil
 import tempfile
 import threading
 
-import customtkinter as ctk
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar,
+                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
-from core.constants import COLORS, FONTS
-from ui.theme import use_app_icon
+from core import paths, voice_selection
+from core.constants import COLORS
 from core.voice_cloning import voicematch
 from core.voice_cloning.errors import VCCancelled, VCError
+from ui import theme
+from ui.widgets import IconLabel
+from ui.bridge import ui
 
+# The constants below match ui/panels/analyzer_dialog.py, which cannot be
+# imported here (it loads CustomTkinter).
 # The selection (Clean-up → Use part of each recording) is measured and spoken
 # up to this length: Quick voices read at most 25 s, and each Result is spoken
 # and cloned once per shortlisted voice.
 MAX_ANALYSIS_SECONDS = 25
 PLAY_CHANNEL = 5
+WATCH_MS = 200         # how often a playing clip is checked for its end
+
+EXPLAINER = ("Speaks your clip's words with the closest English engine voices, clones them "
+             "and ranks the results. Apply sets the engine, voice and speed; you can still "
+             "change them.")
 
 
-class AnalyzerDialog(ctk.CTkToplevel):
+class AnalyzerDialog(QDialog):
     def __init__(self, app, selections, clean=False, denoise=False, on_applied=None, gender="auto"):
         super().__init__(app)
-        use_app_icon(self)
+        self.setObjectName("analyzerDialog")
+        ico = paths.bundle_dir() / "assets" / "adits_voice_studio.ico"
+        if ico.exists():
+            self.setWindowIcon(QIcon(str(ico)))
         self.app = app
         self.selections = selections
         self.gender_mode = gender if gender in voicematch.GENDERS else "auto"
@@ -60,13 +88,15 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self.clean = clean
         self.denoise = denoise
         self.on_applied = on_applied
-        self.title("Voice match")
-        self.configure(fg_color=COLORS["bg_dark"])
-        self.geometry("840x560")
-        self.minsize(640, 480)
-        self.transient(app)
+        self.setWindowTitle("Voice match")
+        self.resize(840, 560)
+        self.setMinimumSize(640, 480)
+        self.setModal(False)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setStyleSheet(self._sheet())
         self._cancel = threading.Event()
         self._busy = False
+        self._closed = False
         self._tmp = tempfile.mkdtemp(prefix="adits_vs_match_")
         self._clip = None
         self._clip_wav = None         # the prepared clip (trim, music removal), played by ▶ Original
@@ -76,82 +106,153 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self._clip_text = ""          # the clip's Whisper transcript, spoken by ▶ Result
         self._sound = None
         self._playing = None          # (key, button, idle_text) of the clip being played
+        self._watch_timer = QTimer(self)
+        self._watch_timer.setInterval(WATCH_MS)
+        self._watch_timer.timeout.connect(self._watch)
         try:
             self._eng_settings = app.engine_panel.get_settings()
         except Exception:
             self._eng_settings = {}
 
-        head = ctk.CTkFrame(self, fg_color="transparent")
-        head.pack(fill="x", padx=16, pady=(14, 2))
-        ctk.CTkLabel(head, text="🔍  Voice match", font=FONTS["subtitle"],
-                     text_color=COLORS["text_primary"]).pack(side="left")
-        ctk.CTkLabel(self, text="Speaks your clip's words with the closest English engine voices, clones them "
-                                "and ranks the results. Apply sets the engine, voice and speed; you can still "
-                                "change them.",
-                     font=FONTS["body_small"], text_color=COLORS["text_muted"], wraplength=720,
-                     justify="left").pack(anchor="w", padx=16)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(0)
+
+        title = IconLabel("🔍  Voice match")
+        title.setObjectName("cardTitle")
+        root.addWidget(title)
+        root.addSpacing(2)
+        explainer = theme.label(EXPLAINER, muted=True, small=True)
+        explainer.setWordWrap(True)
+        root.addWidget(explainer)
 
         # progress (Cancel only while something runs)
-        self._task = ctk.CTkFrame(self, fg_color="transparent")
-        self._task.pack(fill="x", padx=16, pady=(8, 0))
-        self._task.columnconfigure(0, weight=1)
-        self._bar = ctk.CTkProgressBar(self._task, height=6, fg_color=COLORS["slider_track"],
-                                       progress_color=COLORS["accent_primary"], corner_radius=3)
-        self._bar.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self._bar.set(0)
-        self._cancel_btn = ctk.CTkButton(self._task, text="✖  Cancel", font=FONTS["button"], width=96,
-                                         height=28, corner_radius=8, fg_color="#CC0000",
-                                         hover_color=COLORS["error"], command=self._on_cancel)
-        self._cancel_btn.grid(row=0, column=1, rowspan=2)
-        self._stage = ctk.CTkLabel(self._task, text="", font=FONTS["body_small"],
-                                   text_color=COLORS["text_secondary"], anchor="w", justify="left",
-                                   wraplength=580)
-        self._stage.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        task = QGridLayout()
+        task.setContentsMargins(0, 8, 0, 0)
+        task.setHorizontalSpacing(8)
+        task.setVerticalSpacing(2)
+        task.setColumnStretch(0, 1)
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 1000)
+        self._bar.setValue(0)
+        self._bar.setTextVisible(False)
+        task.addWidget(self._bar, 0, 0, Qt.AlignVCenter)
+        self._cancel_btn = theme.button("✖  Cancel", theme.ROLE_DANGER)
+        self._cancel_btn.setObjectName("amCancel")
+        self._cancel_btn.setFixedSize(96, 28)
+        self._cancel_btn.setAutoDefault(False)
+        self._cancel_btn.clicked.connect(lambda _c=False: self._on_cancel())
+        task.addWidget(self._cancel_btn, 0, 1, 2, 1, Qt.AlignVCenter)
+        self._stage = theme.label("", small=True)
+        self._stage.setWordWrap(True)
+        self._stage.setMinimumWidth(1)
+        theme.set_color(self._stage, COLORS["text_secondary"])
+        task.addWidget(self._stage, 1, 0)
+        root.addLayout(task)
 
         # clip summary
-        clip_box = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=12, border_width=1,
-                                border_color=COLORS["border"])
-        clip_box.pack(fill="x", padx=16, pady=(10, 4))
-        ctk.CTkLabel(clip_box, text="Your clip", font=("Segoe UI", 12, "bold"),
-                     text_color=COLORS["text_secondary"]).pack(anchor="w", padx=12, pady=(8, 0))
-        self._clip_lbl = ctk.CTkLabel(clip_box, text="Analyzing…", font=FONTS["body"],
-                                      text_color=COLORS["text_primary"], anchor="w", justify="left",
-                                      wraplength=700)
-        self._clip_lbl.pack(anchor="w", padx=12, pady=(2, 10))
+        root.addSpacing(10)
+        clip_box = QFrame()
+        clip_box.setObjectName("amClip")
+        cl = QVBoxLayout(clip_box)
+        cl.setContentsMargins(12, 8, 12, 10)
+        cl.setSpacing(2)
+        cl.addWidget(theme.section_label("Your clip"))
+        self._clip_lbl = QLabel("Analyzing…")
+        self._clip_lbl.setObjectName("amClipText")
+        self._clip_lbl.setWordWrap(True)
+        self._clip_lbl.setMinimumWidth(1)
+        cl.addWidget(self._clip_lbl)
+        root.addWidget(clip_box)
+        root.addSpacing(4)
 
-        # ranked matches
-        self._list = ctk.CTkFrame(self, fg_color="transparent")
-        self._list.pack(fill="both", expand=True, padx=16, pady=4)
+        # ranked matches (a scroll area only so a small window clips them instead of growing)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        holder = QWidget()
+        holder.setObjectName("amList")
+        self._list = QVBoxLayout(holder)
+        self._list.setContentsMargins(0, 4, 0, 4)
+        self._list.setSpacing(8)
+        self._list.addStretch(1)
+        self._scroll.setWidget(holder)
+        root.addWidget(self._scroll, 1)
 
-        foot = ctk.CTkFrame(self, fg_color="transparent")
-        foot.pack(fill="x", padx=16, pady=(4, 14))
-        ctk.CTkButton(foot, text="Close", font=FONTS["button"], width=90, height=32, corner_radius=8,
-                      fg_color=COLORS["bg_card"], hover_color=COLORS["border"],
-                      command=self.destroy).pack(side="right")
+        foot = QHBoxLayout()
+        foot.setContentsMargins(0, 4, 0, 0)
+        foot.addStretch(1)
+        close = theme.button("Close", theme.ROLE_GHOST)
+        close.setObjectName("amClose")
+        close.setFixedSize(90, 32)
+        close.setAutoDefault(False)
+        close.clicked.connect(lambda _c=False: self.close())
+        foot.addWidget(close)
+        root.addLayout(foot)
 
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
-        self.after(150, self._grab)
-        self.after(300, self._start)
+        QTimer.singleShot(150, self._grab)
+        QTimer.singleShot(300, self._start)
+
+    @staticmethod
+    def _sheet():
+        c = COLORS
+        return f"""
+QDialog#analyzerDialog {{ background: {c['bg_dark']}; }}
+QDialog#analyzerDialog QPushButton {{ min-height: 0px; padding: 0; border-radius: 8px; }}
+QFrame#amClip {{
+    background: {c['bg_card']}; border: 1px solid {c['border']}; border-radius: 12px;
+}}
+QFrame#amClip QLabel {{ background: transparent; }}
+QLabel#amClipText {{ font-family: 'Segoe UI'; font-size: 13px; color: {c['text_primary']}; }}
+QWidget#amList {{ background: transparent; }}
+QFrame#amRow {{
+    background: {c['bg_input']}; border: 1px solid {c['border']}; border-radius: 10px;
+}}
+QFrame#amRow[best="true"] {{ border: 2px solid {c['success']}; }}
+QFrame#amRow QLabel {{ background: transparent; border: none; }}
+QLabel#amTag {{ font-family: 'Segoe UI'; font-size: 11px; font-weight: bold; color: {c['text_secondary']}; }}
+QLabel#amTag[best="true"] {{ color: {c['success']}; }}
+QLabel#amVoice {{ font-family: 'Segoe UI'; font-size: 13px; font-weight: bold; color: {c['text_primary']}; }}
+QLabel#amDetail {{ font-family: 'Segoe UI'; font-size: 11px; color: {c['text_secondary']}; }}
+QLabel#amNone {{ font-family: 'Segoe UI'; font-size: 13px; color: {c['text_muted']}; }}
+QPushButton#amPlay {{
+    background: {c['bg_card']}; border: 1px solid {c['border']};
+    font-family: 'Segoe UI'; font-size: 11px;
+}}
+QPushButton#amApply {{ border: none; }}
+QPushButton#amCancel {{ border: none; }}
+QPushButton#amClose {{ background: {c['bg_card']}; border: none; }}
+QPushButton#amClose:hover {{ background: {c['border']}; }}
+"""
 
     def _grab(self):
-        try:
-            self.lift()
-            self.focus_force()
-        except Exception:
-            pass
+        if self._closed:
+            return
+        self.raise_()
+        self.activateWindow()
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:   # the CTk dialog has no Esc binding
+            e.accept()
+            return
+        super().keyPressEvent(e)
 
     # ── task plumbing ──────────────────────────────────────────────
     def _ui(self, fn, *args):
-        try:
-            self.after(0, lambda: self.winfo_exists() and fn(*args))
-        except Exception:
-            pass   # window closed while work was still running
+        """Run fn(*args) on the GUI thread, unless the window has closed meanwhile."""
+        ui(self._guarded, fn, args)
+
+    def _guarded(self, fn, args):
+        if not self._closed:          # window closed while work was still running
+            fn(*args)
 
     def _progress(self, frac, msg):
         if frac is not None:
-            self._bar.set(max(0.0, min(1.0, float(frac))))
+            self._bar.setValue(int(round(max(0.0, min(1.0, float(frac))) * 1000)))
         if msg:
-            self._stage.configure(text=msg, text_color=COLORS["text_secondary"])
+            self._stage.setText(msg)
+            theme.set_color(self._stage, COLORS["text_secondary"])
 
     def _check(self):
         if self._cancel.is_set():
@@ -160,13 +261,15 @@ class AnalyzerDialog(ctk.CTkToplevel):
     def _on_cancel(self):
         if self._busy:
             self._cancel.set()
-            self._cancel_btn.configure(state="disabled", text="Cancelling…")
+            self._cancel_btn.setEnabled(False)
+            self._cancel_btn.setText("Cancelling…")
 
     def _finish(self, message, color):
         self._busy = False
-        self._cancel_btn.grid_remove()
+        self._cancel_btn.hide()
         if message:
-            self._stage.configure(text=message, text_color=color)
+            self._stage.setText(message)
+            theme.set_color(self._stage, color)
 
     # ── the run ────────────────────────────────────────────────────
     def _prepare_clip(self):
@@ -193,14 +296,20 @@ class AnalyzerDialog(ctk.CTkToplevel):
         return path
 
     def _start(self):
+        if self._closed:
+            return
         self._busy = True
         self._cancel.clear()
-        self._cancel_btn.grid()
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setText("✖  Cancel")
+        self._cancel_btn.show()
+        engine_names = list(self.app.synth.engine_map)
+        system_voices = self.app.system_voices
 
         def work():
             from core.voice_cloning import get_client
             client = get_client()
-            cands = voicematch.candidates(list(self.app.synth.engine_map), self.app.system_voices)
+            cands = voicematch.candidates(engine_names, system_voices)
             self._cands = {c["id"]: c for c in cands}
             bank = voicematch.load_bank()
             if voicematch.needs_work(bank, cands):
@@ -232,7 +341,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
                 return clip, [], None
 
             if not self._clip_text:
-                return clip, shortlist, ("No words were heard in your clip, so there is no ▶ Result. "
+                return clip, shortlist, ("No words were heard in your clip, so there is no Result. "
                                          "Ranked by voice similarity.")
             return clip, *self._make_results(shortlist, clip_wav, clip)
 
@@ -268,7 +377,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
         if clip.get("lang") and clip["lang"] != "en" and clip.get("lang_prob", 0) >= voicematch.LANG_CONFIDENCE:
             text += (f"\n⚠  The clip sounds like {lang}. Voice match compares English voices only, "
                      "so treat the matches as rough.")
-        self._clip_lbl.configure(text=text)
+        self._clip_lbl.setText(text)
 
     def _make_results(self, shortlist, clip_wav, clip):
         """Speak the clip's words with each shortlisted voice, clone them, rank by the results.
@@ -279,7 +388,6 @@ class AnalyzerDialog(ctk.CTkToplevel):
         import numpy as np
         from core.audio_io import load_segment
         from core.voice_cloning import get_client, library
-        from ui.panels.engine_panel import EnginePanel
         client = get_client()
         ref = os.path.join(self._tmp, "reference.wav")
         library._drop_silences(load_segment(clip_wav))[:25000].export(ref, format="wav")
@@ -302,7 +410,7 @@ class AnalyzerDialog(ctk.CTkToplevel):
                 m["result"] = out
                 # what the Result was spoken with, so a voice created with the same
                 # base can reuse it as its preview
-                m["synth_key"] = EnginePanel.synthesis_key(
+                m["synth_key"] = voice_selection.synthesis_key(
                     voicematch.speak_settings(self._eng_settings, cand, m.get("speed")))
             except VCCancelled:
                 raise
@@ -328,76 +436,99 @@ class AnalyzerDialog(ctk.CTkToplevel):
         self._ranked = ranked
         self._finish(note or "Done. Apply the best match, or listen to the others first.",
                      COLORS["warning"] if note else COLORS["success"])
-        self._bar.set(1.0)
+        self._bar.setValue(1000)
         self._render()
 
     # ── results ────────────────────────────────────────────────────
     def _render(self):
-        for w in self._list.winfo_children():
-            w.destroy()
+        self._stop()
+        while self._list.count() > 1:            # keep the trailing stretch
+            w = self._list.takeAt(0).widget()
+            if w is not None:
+                w.deleteLater()
         if not self._ranked:
             who = f"{self._gender} " if self._gender else ""
-            ctk.CTkLabel(self._list, text=f"No matching English {who}engine voice was found.", font=FONTS["body"],
-                         text_color=COLORS["text_muted"]).pack(anchor="w", pady=10)
+            lab = QLabel(f"No matching English {who}engine voice was found.")
+            lab.setObjectName("amNone")
+            lab.setContentsMargins(0, 6, 0, 6)
+            self._list.insertWidget(0, lab)
             return
         clip_f0 = (self._clip or {}).get("f0")
         for i, m in enumerate(self._ranked, 1):
             best = i == 1
-            card = ctk.CTkFrame(self._list, fg_color=COLORS["bg_input"], corner_radius=10,
-                                border_width=2 if best else 1,
-                                border_color=COLORS["success"] if best else COLORS["border"])
-            card.pack(fill="x", pady=4)
-            left = ctk.CTkFrame(card, fg_color="transparent")
-            left.pack(side="left", fill="x", expand=True, padx=12, pady=8)
-            tag = "Best match" if best else "Close match"
-            ctk.CTkLabel(left, text=f"{i}.  {tag}", font=("Segoe UI", 11, "bold"),
-                         text_color=COLORS["success"] if best else COLORS["text_secondary"],
-                         anchor="w").pack(anchor="w")
-            ctk.CTkLabel(left, text=m["label"], font=("Segoe UI", 13, "bold"), text_color=COLORS["text_primary"],
-                         anchor="w").pack(anchor="w")
+            card = QFrame()
+            card.setObjectName("amRow")
+            card.setProperty("best", best)
+            row = QHBoxLayout(card)
+            row.setContentsMargins(12, 8, 10, 8)
+            row.setSpacing(0)
+            left = QVBoxLayout()
+            left.setSpacing(0)
+            tag = QLabel(f"{i}.  {'Best match' if best else 'Close match'}")
+            tag.setObjectName("amTag")
+            tag.setProperty("best", best)
+            left.addWidget(tag)
+            voice = QLabel(m["label"])
+            voice.setObjectName("amVoice")
+            voice.setMinimumWidth(1)
+            left.addWidget(voice)
             detail = []
             if m.get("f0") and clip_f0:
                 detail.append(f"pitch {m['f0']:.0f} Hz vs your {clip_f0:.0f} Hz")
             if m.get("speed") is not None:
                 detail.append(f"speed {m['speed']}{' WPM' if m['selection'].get('kind') == 'pyttsx3' else 'x'}")
             if detail:
-                ctk.CTkLabel(left, text=" · ".join(detail), font=FONTS["body_small"],
-                             text_color=COLORS["text_secondary"], anchor="w").pack(anchor="w")
-            btns = ctk.CTkFrame(card, fg_color="transparent")
-            btns.pack(side="right", padx=10)
+                d = QLabel(" · ".join(detail))
+                d.setObjectName("amDetail")
+                d.setMinimumWidth(1)
+                left.addWidget(d)
+            row.addLayout(left, 1)
+            row.addSpacing(10)
             if self._clip_wav:
-                self._play_button(btns, f"original:{m['id']}", "▶ Original", self._clip_wav,
-                                  COLORS["accent_secondary"])
+                row.addWidget(self._play_button(f"original:{m['id']}", "▶ Original", self._clip_wav,
+                                                COLORS["accent_secondary"]))
+                row.addSpacing(4)
             if m.get("result"):
-                self._play_button(btns, f"result:{m['id']}", "▶ Result", m["result"], COLORS["success"])
-            ctk.CTkButton(btns, text="Apply", font=FONTS["button"], width=70, height=28, corner_radius=8,
-                          fg_color=COLORS["accent_primary"], hover_color=COLORS["accent_secondary"],
-                          command=lambda m=m: self._apply(m)).pack(side="left", padx=(6, 0))
+                row.addWidget(self._play_button(f"result:{m['id']}", "▶ Result", m["result"], COLORS["success"]))
+                row.addSpacing(4)
+            apply_btn = theme.button("Apply", theme.ROLE_PRIMARY)
+            apply_btn.setObjectName("amApply")
+            apply_btn.setFixedSize(70, 28)
+            apply_btn.setAutoDefault(False)
+            apply_btn.clicked.connect(lambda _c=False, m=m: self._apply(m))
+            row.addSpacing(2)
+            row.addWidget(apply_btn, 0, Qt.AlignVCenter)
+            card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+            self._list.insertWidget(self._list.count() - 1, card)
 
-    def _play_button(self, parent, key, text, path, color):
-        b = ctk.CTkButton(parent, text=text, font=FONTS["body_small"], width=78, height=28, corner_radius=8,
-                          fg_color=COLORS["bg_card"], hover_color=color, border_color=color, border_width=1)
-        b.configure(command=lambda: self._toggle(key, b, text, path))
-        b.pack(side="left", padx=2)
+    def _play_button(self, key, text, path, color):
+        b = theme.button(text, theme.ROLE_GHOST)
+        b.setObjectName("amPlay")
+        # each toggle is outlined in its own color and fills with it on hover
+        b.setStyleSheet(f"QPushButton#amPlay {{ border-color: {color}; }}"
+                        f"QPushButton#amPlay:hover {{ background: {color}; }}")
+        b.setFixedSize(78, 28)
+        b.setAutoDefault(False)
+        b.clicked.connect(lambda _c=False: self._toggle(key, b, text, path))
         return b
 
     def _apply(self, m):
         err = self.app.engine_panel.apply_voice_selection(m["selection"])
         if err:
-            self._stage.configure(text=f"⚠  Could not apply: {err}", text_color=COLORS["warning"])
+            self._stage.setText(f"⚠  Could not apply: {err}")
+            theme.set_color(self._stage, COLORS["warning"])
             return
-        from ui.panels.engine_panel import EnginePanel
-        desc = EnginePanel.describe_selection(m["selection"])
+        desc = voice_selection.describe_selection(m["selection"])
         self.app.set_status(f"🔍  TTS Engine set to {desc} by voice match. Create the voice to keep it "
-                             "as its base.", COLORS["success"])
+                            "as its base.", COLORS["success"])
         if self.on_applied:
             result = None
             if m.get("result") and os.path.isfile(m["result"]):
-                # on_applied copies the file before destroy() removes this window's temp folder
+                # on_applied copies the file before close() removes this window's temp folder
                 result = {"wav": m["result"], "synth_key": m["synth_key"], "selections": self.selections,
                           "clean": self.clean, "denoise": self.denoise}
             self.on_applied(m["selection"], result)
-        self.destroy()
+        self.close()
 
     # ── play / stop toggles ────────────────────────────────────────
     def _toggle(self, key, button, idle_text, path):
@@ -409,33 +540,35 @@ class AnalyzerDialog(ctk.CTkToplevel):
             import pygame
             if not pygame.mixer.get_init() or not os.path.exists(path):
                 return
+            if pygame.mixer.get_num_channels() <= PLAY_CHANNEL:
+                pygame.mixer.set_num_channels(PLAY_CHANNEL + 1)
             self._sound = pygame.mixer.Sound(path)
             pygame.mixer.Channel(PLAY_CHANNEL).play(self._sound)
         except Exception as e:
             print(f"Voice match playback failed: {e}")
             return
         self._playing = (key, button, idle_text)
-        button.configure(text="■ Stop")
-        self.after(200, self._watch)
+        button.setText("■ Stop")
+        self._watch_timer.start()
 
     def _watch(self):
         """Reset the button when the clip ends on its own."""
-        if self._playing is None or not self.winfo_exists():
+        if self._playing is None or self._closed:
+            self._watch_timer.stop()
             return
         try:
             import pygame
             busy = pygame.mixer.get_init() and pygame.mixer.Channel(PLAY_CHANNEL).get_busy()
         except Exception:
             busy = False
-        if busy:
-            self.after(200, self._watch)
-        else:
+        if not busy:
             self._stop()
 
     def _stop(self):
+        self._watch_timer.stop()
         try:
             import pygame
-            if pygame.mixer.get_init():
+            if pygame.mixer.get_init() and pygame.mixer.get_num_channels() > PLAY_CHANNEL:
                 pygame.mixer.Channel(PLAY_CHANNEL).stop()
         except Exception:
             pass
@@ -443,14 +576,25 @@ class AnalyzerDialog(ctk.CTkToplevel):
             _key, button, idle_text = self._playing
             self._playing = None
             try:
-                if button.winfo_exists():
-                    button.configure(text=idle_text)
-            except Exception:
+                button.setText(idle_text)
+            except RuntimeError:        # the row was rebuilt meanwhile
                 pass
 
-    def destroy(self):
+    # ── closing ────────────────────────────────────────────────────
+    def _release(self):
+        """Cancel the run, stop audio and delete the temp folder (the CTk destroy())."""
+        if self._closed:
+            return
+        self._closed = True
         self._cancel.set()
         self._stop()
         self._sound = None
         shutil.rmtree(self._tmp, ignore_errors=True)
-        super().destroy()
+
+    def closeEvent(self, e):
+        self._release()
+        super().closeEvent(e)
+
+    def reject(self):
+        self._release()
+        super().reject()

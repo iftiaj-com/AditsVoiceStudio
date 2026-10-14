@@ -104,11 +104,11 @@ def candidates(engine_names, system_voices):
     Online engines (gTTS, Edge) are left out.
     """
     from core.constants import KOKORO_LANGS, KOKORO_VOICES, MELO_VOICES, PIPER_VOICES
-    from ui.panels.engine_panel import EnginePanel
+    from core.voice_selection import engine_kind
     out = []
     by_kind = {}
     for name in engine_names:
-        kind = EnginePanel.engine_kind(name)
+        kind = engine_kind(name)
         if kind in ("kokoro", "melo", "piper", "pyttsx3"):
             by_kind.setdefault(kind, name)
     short = {k: v.split(" (")[0] for k, v in by_kind.items()}

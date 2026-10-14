@@ -1,108 +1,88 @@
 """
 ui/app.py
-──────────
-AditsVoiceStudioApp — the main application window.
-Assembles all panels and owns the generation / playback pipeline.
-"""
+────────────
+MainWindow: the Qt main window, started with `tts_app.py --qt`.
 
+Header, two-column layout and status bar, with Text Input and Playback &
+Export on the left and TTS Engine, Customization (with Clone Voice) and Voice
+Effects on the right (phases 2 to 4 of docs/pyside6-migration-plan.md).
+
+Threads: the generation worker never touches a widget. It reports through
+ui.bridge.ui(), which runs the call on the GUI thread.
+
+Start-up: the window opens at once with Text Input, Playback (Generate reads
+"Starting…") and a loading card on the right. A background thread imports
+the engine adapters and the pipeline and reads the system voices (about 2 s);
+the right-hand panels are then built on the GUI thread, one per event-loop
+turn so the window keeps painting. No TTS library or model loads here: the
+adapters, librosa and torch load on first use, so the first Generate with an
+engine takes longer. This module imports nothing heavy at the top.
+"""
 import os
-import sys
-import io
-import time
-import atexit
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
-import subprocess
-import webbrowser
-import re
+import time
 
-# Pyinstaller windowed-mode fix. tts_app.py normally routes these to a log
-# file first (core.paths.configure_runtime); this is the last-resort guard.
-if sys.stdout is None:
-    sys.stdout = io.StringIO()
-if sys.stderr is None:
-    sys.stderr = io.StringIO()
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
+                               QMainWindow, QMessageBox, QScrollArea, QSizePolicy, QVBoxLayout,
+                               QWidget)
 
-import customtkinter as ctk
-from tkinter import filedialog, messagebox
-from PIL import Image
-import pygame
-import torch   # noqa: F401  loaded here, before the window, as before core.pipeline existed
-
-from core.constants import COLORS, FONTS
 from core import paths
-from core import pipeline
+from core.constants import COLORS
 from core.playback import Player
-from core.synth import Synthesizer
 from core.version import APP_TITLE
-from ui.theme import card, SmoothScrollableFrame
-from ui.panels.text_panel          import TextPanel
-from ui.panels.engine_panel        import EnginePanel
-from ui.panels.effects_panel       import EffectsPanel
-from ui.panels.customization_panel import CustomizationPanel
-from ui.panels.playback_panel      import PlaybackPanel
+from ui import bridge, icons, theme
+from ui.bridge import ui
+from ui.panels.playback_panel import PlaybackPanel
+from ui.panels.text_panel import TextPanel
+from ui.widgets import IconLabel
 
-from engines.registry   import get_available_engines
-from engines.pyttsx3_engine import Pyttsx3Engine
-from effects.registry       import EFFECTS_REGISTRY
-import core.voice_cloning as voice_cloning
+SITE_URL = "https://www.iftiaj.com"
 
 
-class AditsVoiceStudioApp(ctk.CTk):
+class MainWindow(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, background=True):
+        """background=False loads the engines before returning (self-test)."""
         super().__init__()
+        import pygame
 
-        self.title(APP_TITLE)
-        self.geometry("1180x680")
-        self.minsize(1100, 600)
-        self.configure(fg_color=COLORS["bg_dark"])
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
+        self.setWindowTitle(APP_TITLE)
+        self.resize(1180, 680)
+        self.setMinimumSize(1100, 600)
+        ico = paths.bundle_dir() / "assets" / "adits_voice_studio.ico"
+        if ico.exists():
+            self.setWindowIcon(QIcon(str(ico)))
 
-        # Window & taskbar icon
-        ico_file = paths.bundle_dir() / "assets" / "adits_voice_studio.ico"
-        if ico_file.exists():
-            try:
-                self.iconbitmap(default=str(ico_file))
-            except Exception:
-                try:
-                    self.iconbitmap(str(ico_file))
-                except Exception:
-                    pass
-
-        # State
+        # State (same names and meaning as AditsVoiceStudioApp)
         self._temp_playback_file = None
-        self._temp_save_file     = None
-        self._temp_save_ext      = ".wav"
-        self._temp_mp3           = None
-        self._temp_srt           = None
-        self._final_saved_file   = None
-        self._is_generating      = False
-        self._gen_notice         = None    # warning shown instead of "success"
-        self._stop_event         = threading.Event()
-        self._tmp_dirs           = set()   # every mkdtemp we own, for cleanup
-        self._player             = Player()
-        self._play_poll          = None    # after() id of _poll_playback
+        self._temp_save_file = None
+        self._temp_save_ext = ".wav"
+        self._temp_mp3 = None
+        self._temp_srt = None
+        self._final_saved_file = None
+        self._is_generating = False
+        self._gen_notice = None
+        self._stop_event = threading.Event()
+        self._tmp_dirs = set()
+        self._player = Player()
+        self._play_timer = QTimer(self)
+        self._play_timer.setInterval(50)
+        self._play_timer.timeout.connect(self._poll_playback)
 
-        # Best-effort temp cleanup on any interpreter exit (incl. unhandled
-        # exceptions). Hard crashes are covered by the startup sweep in
-        # tts_app.py (core.temp_cleanup.sweep_orphan_temp_dirs).
-        atexit.register(self._cleanup_tmp_dirs)
-
-        # Engines
-        self._available_engines = get_available_engines()
-        # Every engine.synthesize() call (generation, Clone Voice, voice match) goes through it.
-        self.synth              = Synthesizer(self._available_engines)
-
-        # System voices for pyttsx3
+        self._available_engines = []
+        self.synth = None
         self._system_voices = []
-        if Pyttsx3Engine.is_available():
-            self._system_voices = Pyttsx3Engine.load_system_voices()
+        self._engine_panel = self._cust_panel = self._effects_panel = None
+        self._loaded = False
+        self._load_error = None
 
-        # No audio device (some VMs, RDP sessions) must not stop the window
-        # from opening; generation and saving still work without playback.
         self._audio_error = None
         try:
             pygame.mixer.init()
@@ -110,134 +90,209 @@ class AditsVoiceStudioApp(ctk.CTk):
             self._audio_error = str(e)
             print(f"Audio output unavailable: {e}")
         self._build_ui()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-        if self._audio_error:
-            self.set_status(f"⚠  No audio output device — playback disabled ({self._audio_error})",
-                             COLORS["warning"])
-
-    # ──────────────────────────────────────────────────────────────
-    #  UI
-    # ──────────────────────────────────────────────────────────────
-
-    def _build_ui(self):
-        # Main container filling the window
-        main_container = ctk.CTkFrame(self, fg_color=COLORS["bg_dark"])
-        main_container.pack(fill="both", expand=True)
-
-        # Header (Top, full width)
-        header = ctk.CTkFrame(main_container, fg_color="transparent")
-        header.pack(fill="x", padx=24, pady=(18, 4))
-        header.columnconfigure(1, weight=1)
-
-        logo_path = paths.bundle_dir() / "assets" / "logo.png"
-        self._logo_image = None
-        if logo_path.exists():
-            try:
-                logo_pil = Image.open(logo_path)
-                self._logo_image = ctk.CTkImage(light_image=logo_pil, dark_image=logo_pil, size=(48, 48))
-                logo_label = ctk.CTkLabel(header, text="", image=self._logo_image)
-                logo_label.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="w")
-            except Exception:
-                bar = ctk.CTkFrame(header, width=5, height=50,
-                                   fg_color=COLORS["accent_primary"], corner_radius=3)
-                bar.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="ns")
+        if background:
+            threading.Thread(target=self._load_worker, daemon=True, name="load-engines").start()
         else:
-            bar = ctk.CTkFrame(header, width=5, height=50,
-                               fg_color=COLORS["accent_primary"], corner_radius=3)
-            bar.grid(row=0, column=0, rowspan=2, padx=(0, 14), sticky="ns")
+            self._on_engines_loaded(*self._load_engines())
+            while not self._loaded:
+                QApplication.processEvents()
 
-        ctk.CTkLabel(header, text=APP_TITLE, font=FONTS["title"],
-                     text_color=COLORS["text_primary"]).grid(row=0, column=1, sticky="w")
-        engine_names = " + ".join(e.name.split("(")[0].split(" ")[0]
-                                  for e in self._available_engines)
-        ctk.CTkLabel(header,
-                     text=f"Text-to-Speech, Audio FX & Voice Cloning",
-                     font=FONTS["body_small"],
-                     text_color=COLORS["text_muted"]).grid(row=1, column=1, sticky="w")
+    # ── engines, loaded in the background ──────────────────────────
+    @staticmethod
+    def _load_engines():
+        """Engine discovery and the panels' imports. Runs off the GUI thread."""
+        from core import pipeline  # noqa: F401
+        import core.voice_cloning  # noqa: F401  (is_training / shutdown_client at close)
+        from engines.pyttsx3_engine import Pyttsx3Engine
+        from engines.registry import get_available_engines
+        # "from" form: a bare `import ui.panels...` would bind the name ui here,
+        # hiding ui.bridge.ui used elsewhere in this module.
+        from ui.panels import customization_panel, effects_panel, engine_panel  # noqa: F401
+        engines = get_available_engines()
+        voices = Pyttsx3Engine.load_system_voices() if Pyttsx3Engine.is_available() else []
+        return engines, voices
 
-        # Split content frame (Middle)
-        content_frame = ctk.CTkFrame(main_container, fg_color="transparent")
-        content_frame.pack(fill="both", expand=True, padx=24, pady=(10, 10))
-        # "uniform" locks both columns to a fixed 50/50 split so button
-        # text/state changes during generation can't re-balance the layout.
-        content_frame.columnconfigure(0, weight=1, minsize=500, uniform="content")
-        content_frame.columnconfigure(1, weight=1, minsize=500, uniform="content")
-        content_frame.rowconfigure(0, weight=1)
+    def _load_worker(self):
+        try:
+            res = self._load_engines()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            ui(self._on_load_failed, f"{type(e).__name__}: {e}")
+            return
+        ui(self._on_engines_loaded, *res)
 
-        # Left Column (Text Input + Playback)
-        left_col = ctk.CTkFrame(content_frame, fg_color="transparent")
-        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+    def _on_load_failed(self, msg):
+        self._load_error = msg
+        self._loading_label.setText("❌  The engines could not be loaded: " + msg)
+        self._loading_label.set_icon_color(COLORS["error"])
+        self.set_status(f"❌  Engines failed to load: {msg}", COLORS["error"])
 
-        # Right Column (Scrollable list of panels: TTS Engine, Customization, Voice Effects)
-        right_scroll = SmoothScrollableFrame(
-            content_frame, fg_color="transparent",
-            scrollbar_button_color=COLORS["border"],
-            scrollbar_button_hover_color=COLORS["accent_primary"]
-        )
-        right_scroll.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+    def _on_engines_loaded(self, engines, voices):
+        """Build the right-hand panels, one per event-loop turn."""
+        from core.synth import Synthesizer
+        from ui.panels.customization_panel import CustomizationPanel
+        from ui.panels.effects_panel import EffectsPanel
+        from ui.panels.engine_panel import EnginePanel
 
-        # add="+" preserves CTkScrollableFrame's own <Configure> handler
-        # (_fit_frame_dimensions_to_canvas), which stretches the inner frame
-        # to the full canvas width. Binding without it replaced that handler
-        # and left the right-side cards at their narrow natural width.
-        def _reset_xview(event):
-            right_scroll._parent_canvas.xview_moveto(0)
-        right_scroll._parent_canvas.bind("<FocusIn>", _reset_xview, add="+")
-        right_scroll._parent_canvas.bind("<Configure>", _reset_xview, add="+")
+        self._available_engines = engines
+        self._system_voices = voices
+        self.synth = Synthesizer(engines)
+        self._loading_label.setText("⌛  Building the panels…")
 
-        # Panels in Left Column
-        self._text_panel = TextPanel(left_col, row=None)
+        def engine():
+            self._engine_panel = EnginePanel(self._available_engines, self._system_voices)
+            self._right_l.insertWidget(0, self._engine_panel.frame)
+            QTimer.singleShot(0, customization)
+
+        def customization():
+            self._cust_panel = CustomizationPanel(app=self)
+            self._right_l.insertWidget(1, self._cust_panel.frame)
+            QTimer.singleShot(0, effects)
+
+        def effects():
+            self._effects_panel = EffectsPanel(on_edit_clones=self._open_voice_manager)
+            if self._cust_panel.clone_group is not None:
+                self._cust_panel.clone_group.attach(self._effects_panel)
+            self._right_l.insertWidget(2, self._effects_panel.frame)
+            self._loading_card.hide()
+            self._loading_card.deleteLater()
+            self._loaded = True
+            self._play_panel.set_loading(False)
+            if self._audio_error:
+                self.set_status(f"⚠  No audio output device — playback disabled ({self._audio_error})",
+                                COLORS["warning"])
+            else:
+                self.set_status("Ready — Enter text and click Generate")
+
+        engine()
+
+    # ── UI ─────────────────────────────────────────────────────────
+    def _build_ui(self):
+        root = QWidget()
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(24, 18, 24, 15)
+        outer.setSpacing(10)
+        self.setCentralWidget(root)
+
+        # Header
+        header = QHBoxLayout()
+        header.setSpacing(14)
+        logo = QLabel()
+        logo_path = paths.bundle_dir() / "assets" / "logo.png"
+        pix = QPixmap(str(logo_path)) if logo_path.exists() else QPixmap()
+        if not pix.isNull():
+            dpr = self.devicePixelRatioF()
+            pix = pix.scaled(int(48 * dpr), int(48 * dpr), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix.setDevicePixelRatio(dpr)
+            logo.setPixmap(pix)
+        else:
+            logo.setFixedSize(5, 50)
+            logo.setStyleSheet(f"background: {COLORS['accent_primary']}; border-radius: 3px;")
+        header.addWidget(logo)
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        title = QLabel(APP_TITLE)
+        title.setObjectName("appTitle")
+        titles.addWidget(title)
+        titles.addWidget(theme.label("Text-to-Speech, Audio FX & Voice Cloning", muted=True, small=True))
+        header.addLayout(titles)
+        header.addStretch(1)
+        outer.addLayout(header)
+
+        # Two columns, fixed 50/50: size hints are ignored, so a button text
+        # change during generation cannot shift the split.
+        content = QHBoxLayout()
+        content.setSpacing(10)
+        left = QWidget()
+        left_l = QVBoxLayout(left)
+        left_l.setContentsMargins(0, 0, 0, 0)
+        left_l.setSpacing(12)
+        self._text_panel = TextPanel()
+        left_l.addWidget(self._text_panel.frame, 1)
         self._play_panel = PlaybackPanel(
-            left_col,
-            on_generate=self._on_generate,
-            on_preview=self._on_preview,
-            on_cancel=self._on_cancel,
-            on_play=self._on_play,
-            on_stop=self._on_stop,
-            on_save=self._on_save,
-            on_save_srt=self._on_save_srt,
-            on_open_folder=self._on_open_folder,
-            row=None
-        )
+            on_generate=self._on_generate, on_preview=self._on_preview, on_cancel=self._on_cancel,
+            on_play=self._on_play, on_stop=self._on_stop, on_save_audio=self._on_save,
+            on_save_srt=self._on_save_srt, on_open_folder=self._on_open_folder)
+        self._play_panel.set_loading(True)
+        left_l.addWidget(self._play_panel.frame)
 
-        # Panels in Right Scrollable Column
-        self._engine_panel = EnginePanel(right_scroll, self._available_engines, self._system_voices, row=None)
-        self._cust_panel = CustomizationPanel(right_scroll, row=None, app=self)
-        self._effects_panel = EffectsPanel(right_scroll, row=None,
-                                           on_edit_clones=self._open_voice_manager)
-        if self._cust_panel.clone_group is not None:
-            self._cust_panel.clone_group.attach(self._effects_panel)
+        right = QScrollArea()
+        right.setWidgetResizable(True)
+        right.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right.setFrameShape(QFrame.NoFrame)
+        right_body = QWidget()
+        self._right_l = QVBoxLayout(right_body)
+        self._right_l.setContentsMargins(0, 0, 6, 0)
+        self._right_l.setSpacing(12)
+        # Until the engines are loaded: one card that says so.
+        self._loading_card, lc = theme.card("🔊  TTS Engine")
+        self._loading_label = theme.label("⌛  Loading…", secondary=True)
+        self._loading_label.setWordWrap(True)
+        lc.addWidget(self._loading_label)
+        note = theme.label("Voice models load when you first generate with them. "
+                           "You can type or paste text meanwhile.", muted=True, small=True)
+        note.setWordWrap(True)
+        lc.addWidget(note)
+        self._right_l.addWidget(self._loading_card)
+        self._right_l.addStretch(1)
+        right.setWidget(right_body)
 
-        # Status Bar (Bottom)
-        status_frame = ctk.CTkFrame(main_container, fg_color=COLORS["bg_card"],
-                                    corner_radius=10, border_width=1,
-                                    border_color=COLORS["border"])
-        status_frame.pack(fill="x", padx=24, pady=(5, 15))
+        for col in (left, right):
+            col.setMinimumWidth(500)
+            col.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+            content.addWidget(col, 1)
+        outer.addLayout(content, 1)
 
-        si = ctk.CTkFrame(status_frame, fg_color="transparent")
-        si.pack(fill="x", padx=14, pady=8)
-        self._status_dot = ctk.CTkLabel(si, text="●", font=("Segoe UI", 10),
-                                        text_color=COLORS["text_muted"])
-        self._status_dot.pack(side="left", padx=(0, 8))
-        self._status_label = ctk.CTkLabel(si,
-                                          text="Ready — Enter text and click Generate",
-                                          font=FONTS["status"],
-                                          text_color=COLORS["text_secondary"])
-        self._status_label.pack(side="left")
-        self._site_link = ctk.CTkLabel(si, text="www.iftiaj.com",
-                                       font=FONTS["body_small"],
-                                       text_color=COLORS["accent_primary"],
-                                       fg_color=COLORS["bg_input"],
-                                       corner_radius=6, width=60, height=22, cursor="hand2")
-        self._site_link.pack(side="right", padx=(8, 0))
-        self._site_link.bind("<Button-1>", lambda e: webbrowser.open("https://www.iftiaj.com"))
+        # Status bar
+        bar = QFrame()
+        bar.setObjectName("statusBar")
+        sb = QHBoxLayout(bar)
+        sb.setContentsMargins(14, 8, 14, 8)
+        self._status_label = IconLabel("Ready — Enter text and click Generate")
+        self._status_label.setObjectName("statusText")
+        self._status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        sb.addWidget(self._status_label, 1)
+        link = QLabel("www.iftiaj.com")
+        link.setObjectName("siteLink")
+        link.setCursor(Qt.PointingHandCursor)
+        link.mousePressEvent = lambda e: QDesktopServices.openUrl(QUrl(SITE_URL))
+        sb.addWidget(link)
+        outer.addWidget(bar)
+        self.set_status("⌛  Starting…", COLORS["accent_primary"])
 
-    # ──────────────────────────────────────────────────────────────
-    #  WHAT PANELS AND DIALOGS MAY USE
-    #  Panels use these instead of the private members, so a new UI
-    #  toolkit only has to provide the same names.
-    # ──────────────────────────────────────────────────────────────
+    def refresh_cloned_voices(self, select=None):
+        """Re-read the voice library into the registry, the tiles and the Clone Voice group.
 
+        select: slug of a voice to switch on afterwards (e.g. just created).
+        """
+        from effects.cloned_voices import refresh_cloned_voices
+        from effects.registry import EFFECTS_REGISTRY
+        try:
+            refresh_cloned_voices(EFFECTS_REGISTRY)
+        except Exception as e:
+            print(f"Cloned voice refresh failed: {e}")
+        if not self._loaded:
+            return
+        self._effects_panel.sync()
+        group = self._cust_panel.clone_group
+        if group is not None:
+            group.refresh()
+        if select:
+            self._effects_panel.set_active(f"clone:{select}", True)
+
+    def _open_voice_manager(self):
+        """✏️ in Cloned Voices: rename, re-base, tune or delete voices."""
+        from ui.panels.clone_voice_dialog import ManageVoicesDialog
+        win = getattr(self, "_voice_manager", None)
+        if win is not None and win.isVisible():
+            win.raise_()
+            win.activateWindow()
+            return
+        self._voice_manager = ManageVoicesDialog(self)
+        self._voice_manager.show()
+
+    # ── what panels may use (same names as AditsVoiceStudioApp) ────
     @property
     def engine_panel(self):
         return self._engine_panel
@@ -248,7 +303,7 @@ class AditsVoiceStudioApp(ctk.CTk):
 
     @property
     def cust_panel(self):
-        return getattr(self, "_cust_panel", None)
+        return self._cust_panel
 
     @property
     def system_voices(self):
@@ -258,29 +313,36 @@ class AditsVoiceStudioApp(ctk.CTk):
     def is_generating(self):
         return self._is_generating
 
-    # ──────────────────────────────────────────────────────────────
-    #  STATUS
-    # ──────────────────────────────────────────────────────────────
-
     def set_status(self, text, color=None):
-        self._status_label.configure(text=text)
-        self._status_dot.configure(text_color=color or COLORS["text_muted"])
+        """Status bar: the message's leading emoji becomes an icon in *color*
+        (a dot when it has none); the words stay in the secondary text color."""
+        icon, plain = icons.split(text)
+        self._status_label.setText(text if icon else "●  " + plain)
+        self._status_label.set_icon_color(color or COLORS["text_muted"])
+        self._status_label.setToolTip(plain)
 
-
-    # ──────────────────────────────────────────────────────────────
-    #  GENERATION
-    # ──────────────────────────────────────────────────────────────
-
+    # ── generation ─────────────────────────────────────────────────
     def _on_generate(self):
         self._start_generation(preview=False)
 
     def _on_preview(self):
-        """Fast snippet preview: synthesize only the first sentence with the
-        currently active voice + effects so the user can audition instantly."""
+        """Fast preview: only the first sentence, played when done."""
         self._start_generation(preview=True)
 
+    def _current_request(self, text, preview):
+        """Settings for a run, read here on the GUI thread; the worker gets plain values."""
+        from core import pipeline
+        return pipeline.GenerationRequest(
+            text=text,
+            eng_settings=self._engine_panel.get_settings(),
+            cust_settings=self._cust_panel.get_settings(),
+            fx_active=self._effects_panel.get_active_effects(),
+            preview=preview,
+        )
+
     def _start_generation(self, preview=False):
-        if self._is_generating:
+        from core import pipeline
+        if self._is_generating or not self._loaded:
             return
         text = self._text_panel.get_text().strip()
         if not text:
@@ -288,81 +350,95 @@ class AditsVoiceStudioApp(ctk.CTk):
             return
         if preview:
             text = pipeline.snippet_of(text)
-
-        # Read every setting here, on the Tk thread. The worker gets plain
-        # values and never touches a widget.
         try:
-            req = pipeline.GenerationRequest(
-                text=text,
-                eng_settings=self._engine_panel.get_settings(),
-                cust_settings=self._cust_panel.get_settings(),
-                fx_active=self._effects_panel.get_active_effects(),
-                preview=preview,
-            )
+            req = self._current_request(text, preview)
         except Exception as e:
             self.set_status(f"❌  Error: {e}", COLORS["error"])
-            messagebox.showerror("Generation Error", str(e))
+            QMessageBox.critical(self, "Generation Error", str(e))
             return
 
         self._temp_playback_file = None
-        self._temp_save_file     = None
-        self._temp_save_ext      = ".wav"
-        self._temp_mp3           = None
-        self._temp_srt           = None
-
+        self._temp_save_file = None
+        self._temp_save_ext = ".wav"
+        self._temp_mp3 = None
+        self._temp_srt = None
         tmp_dir = tempfile.mkdtemp(prefix="adits_vs_")
         self._tmp_dirs.add(tmp_dir)
 
         self._is_generating = True
-        self._gen_notice    = None
+        self._gen_notice = None
         self._stop_event.clear()
 
-        pp = self._play_panel
-        pp.generate_btn.configure(state="disabled",
-                                  text="Previewing…" if preview else "Generating…")
-        pp.cancel_btn.configure(state="normal", text="✖  Cancel")
-        pp.set_generating(True)
-        buttons = [pp.play_btn, pp.stop_btn, pp.save_btn, pp.save_srt_btn, pp.open_folder_btn]
-        if getattr(pp, "preview_btn", None):
-            buttons.append(pp.preview_btn)
-        for btn in buttons:
-            btn.configure(state="disabled")
-        pp.progress.set(0)
-        self.set_status("Generating preview…" if preview else "Generating speech…",
-                         COLORS["warning"])
+        if self._player.stop():                     # Generate while the last clip plays
+            self._play_timer.stop()
+            self._resume_ambiance()
+        self._play_panel.set_generating(True, preview=preview)
+        self.set_status("Generating preview…" if preview else "Generating speech…", COLORS["warning"])
 
-        threading.Thread(target=self._generate_worker,
-                         args=(req, tmp_dir), daemon=True).start()
+        threading.Thread(target=self._generate_worker, args=(req, tmp_dir), daemon=True,
+                         name="generate").start()
+
+    def _generate_worker(self, req, tmp_dir):
+        """Runs core.pipeline on this thread; reports to the GUI thread with ui()."""
+        from core import pipeline
+
+        def progress(frac):
+            ui(self._play_panel.set_progress, frac)
+
+        def status(msg):
+            ui(self.set_status, msg, COLORS["accent_primary"])
+
+        def warn(msg):
+            ui(self.set_status, msg, COLORS["warning"])
+
+        try:
+            res = pipeline.run(req, self.synth, tmp_dir, self._stop_event,
+                               progress=progress, status=status, warn=warn)
+        except pipeline.Cancelled:
+            ui(self._on_generate_finish, None)
+            return
+        except Exception as e:
+            if self._stop_event.is_set():
+                ui(self._on_generate_finish, None)   # a cancel raised inside an engine
+            else:
+                ui(self._on_generate_error, str(e))
+            return
+        ui(self._on_generate_done, res, tmp_dir, req.preview)
+
+    def _on_generate_done(self, res, tmp_dir, preview):
+        self._temp_srt = res.srt_file
+        self._temp_mp3 = res.mp3_file
+        self._temp_save_file = res.save_file
+        self._temp_save_ext = res.save_ext
+        self._gen_notice = res.notice
+        for old_dir in list(self._tmp_dirs):          # temp dirs of previous generations
+            if old_dir != tmp_dir:
+                shutil.rmtree(old_dir, ignore_errors=True)
+                self._tmp_dirs.discard(old_dir)
+        self._on_generate_finish(res.playback_file, autoplay=preview)
 
     def _on_cancel(self):
         if self._is_generating:
             self._stop_event.set()
             self.set_status("⌛  Cancelling…", COLORS["warning"])
-            self._play_panel.cancel_btn.configure(state="disabled", text="Cancelling…")
+            self._play_panel.set_cancelling()
+
+    def _reset_generate_buttons(self):
+        self._is_generating = False
+        self._play_panel.set_generating(False)
 
     def _on_generate_finish(self, playback_file, autoplay=False):
-        self._is_generating = False
+        self._reset_generate_buttons()
         pp = self._play_panel
-        pp.generate_btn.configure(state="normal", text="⚡  Generate Speech")
-        pp.set_generating(False)
-        if getattr(pp, "preview_btn", None):
-            pp.preview_btn.configure(state="normal")
+        pp.set_outputs(mp3=False, wav=False, srt=False)
         if playback_file is None:
             self.set_status("⏹  Generation cancelled", COLORS["warning"])
-            pp.progress.set(0)
             return
         self._temp_playback_file = playback_file
-        pp.play_btn.configure(state="normal")
-        pp.save_btn.configure(state="normal")
-        if self._temp_srt and os.path.exists(self._temp_srt):
-            pp.save_srt_btn.configure(state="normal")
-        else:
-            pp.save_srt_btn.configure(state="disabled")
-
-        if self._temp_mp3:
-            pp.open_folder_btn.configure(state="normal")
+        pp.play_btn.setEnabled(True)
+        pp.set_outputs(mp3=self._has(self._temp_mp3), wav=bool(self._wav_source()),
+                       srt=self._has(self._temp_srt))
         if self._gen_notice:
-            # A step was skipped (e.g. the cloned voice); don't hide that behind "success".
             self.set_status(f"⚠  Speech generated. {self._gen_notice}", COLORS["warning"])
         else:
             self.set_status("✅  Speech generated successfully!", COLORS["success"])
@@ -370,167 +446,111 @@ class AditsVoiceStudioApp(ctk.CTk):
             self._on_play()
 
     def _on_generate_error(self, error_msg):
-        self._is_generating = False
-        pp = self._play_panel
-        pp.generate_btn.configure(state="normal", text="⚡  Generate Speech")
-        pp.set_generating(False)
-        if getattr(pp, "preview_btn", None):
-            pp.preview_btn.configure(state="normal")
-        pp.progress.set(0)
+        self._reset_generate_buttons()
         self.set_status(f"❌  Error: {error_msg}", COLORS["error"])
-        messagebox.showerror("Generation Error", error_msg)
+        QMessageBox.critical(self, "Generation Error", error_msg)
 
-    def _generate_worker(self, req, tmp_dir):
-        """Runs core.pipeline on this thread; reports to the Tk thread with after()."""
-        def progress(frac):
-            self.after(0, lambda f=frac: self._play_panel.progress.set(f))
-
-        def status(msg):
-            self.after(0, lambda m=msg: self.set_status(m, COLORS["accent_primary"]))
-
-        def warn(msg):
-            self.after(0, lambda m=msg: self.set_status(m, COLORS["warning"]))
-
-        try:
-            res = pipeline.run(req, self.synth, tmp_dir, self._stop_event,
-                               progress=progress, status=status, warn=warn)
-        except pipeline.Cancelled:
-            self.after(0, self._on_generate_finish, None)
-            return
-        except Exception as e:
-            if self._stop_event.is_set():
-                # A cancel raised inside an engine (e.g. aborted download)
-                self.after(0, self._on_generate_finish, None)
-            else:
-                self.after(0, lambda err=str(e): self._on_generate_error(err))
-            return
-        self.after(0, self._on_generate_done, res, tmp_dir, req.preview)
-
-    def _on_generate_done(self, res, tmp_dir, preview):
-        """Tk thread: keep the result, drop older temp dirs, then finish."""
-        self._temp_srt       = res.srt_file
-        self._temp_mp3       = res.mp3_file
-        self._temp_save_file = res.save_file
-        self._temp_save_ext  = res.save_ext
-        self._gen_notice     = res.notice
-        # Clean up temp dirs from previous generations
-        for old_dir in list(self._tmp_dirs):
-            if old_dir != tmp_dir:
-                shutil.rmtree(old_dir, ignore_errors=True)
-                self._tmp_dirs.discard(old_dir)
-        self._on_generate_finish(res.playback_file, autoplay=preview)
-
-    # ──────────────────────────────────────────────────────────────
-    #  PLAYBACK
-    # ──────────────────────────────────────────────────────────────
-
+    # ── playback ───────────────────────────────────────────────────
     def _on_play(self):
         pf = self._temp_playback_file
         if not pf or not os.path.exists(pf):
             self.set_status("⚠  No audio to play — generate first", COLORS["warning"])
             return
         if self._audio_error:
-            self.set_status("⚠  No audio output device — save the file to listen",
-                             COLORS["warning"])
+            self.set_status("⚠  No audio output device — save the file to listen", COLORS["warning"])
             return
-        amb = self._cust_panel._ambiance_channel
+        amb = self._cust_panel.ambiance_channel
         if amb and amb.get_busy():
             amb.pause()
-        self._cancel_play_poll()
         self._player.play(pf)
-        self._play_panel.play_btn.configure(text="▶  Playing…", state="disabled")
-        self._play_panel.stop_btn.configure(state="normal")
+        self._play_panel.set_playing(True)
         self.set_status("🎵  Playing audio…", COLORS["accent_primary"])
-        self._play_poll = self.after(50, self._poll_playback)
+        self._play_timer.start()
 
     def _poll_playback(self):
-        """Move the progress bar while the audio plays (Tk timer, no thread)."""
-        self._play_poll = None
+        """Fill the Stop button with the playback position while the audio plays."""
         try:
             playing = self._player.is_playing()
             if playing:
-                self._play_panel.progress.set(self._player.fraction())
+                self._play_panel.set_play_progress(self._player.fraction())
         except Exception:
             playing = False
-        if playing:
-            self._play_poll = self.after(50, self._poll_playback)
-        else:
+        if not playing:
+            self._play_timer.stop()
             self._on_playback_done()
 
-    def _cancel_play_poll(self):
-        if self._play_poll:
-            self.after_cancel(self._play_poll)
-            self._play_poll = None
+    def _reset_play_buttons(self):
+        self._play_panel.set_playing(False)
 
-    def _on_playback_done(self):
-        self._play_panel.play_btn.configure(text="▶  Play", state="normal")
-        self._play_panel.stop_btn.configure(state="disabled")
-        self._play_panel.progress.set(0)
-        self.set_status("✅  Playback complete", COLORS["success"])
-        amb = self._cust_panel._ambiance_channel
+    def _resume_ambiance(self):
+        amb = self._cust_panel.ambiance_channel
         if amb:
             amb.unpause()
 
+    def _on_playback_done(self):
+        self._reset_play_buttons()
+        self.set_status("✅  Playback complete", COLORS["success"])
+        self._resume_ambiance()
+
     def _on_stop(self):
         if self._player.stop():
-            self._cancel_play_poll()
-            self._play_panel.play_btn.configure(text="▶  Play", state="normal")
-            self._play_panel.stop_btn.configure(state="disabled")
-            self._play_panel.progress.set(0)
+            self._play_timer.stop()
+            self._reset_play_buttons()
             self.set_status("⏹  Playback stopped", COLORS["text_muted"])
-            amb = self._cust_panel._ambiance_channel
-            if amb:
-                amb.unpause()
+            self._resume_ambiance()
 
-    # ──────────────────────────────────────────────────────────────
-    #  SAVE / EXPORT
-    # ──────────────────────────────────────────────────────────────
+    # ── save / export ──────────────────────────────────────────────
+    def _default_name(self, fallback, ext):
+        words = re.findall(r'\w+', self._text_panel.get_text().strip())
+        prefix = "_".join(words[:3]) if words else fallback
+        return f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}{ext}"
 
-    def _on_save(self):
-        sf = self._temp_save_file
-        if not sf or not os.path.exists(sf):
+    def _ask_save_path(self, title, name, filters, suffix):
+        dlg = QFileDialog(self, title, os.path.join(str(paths.output_dir()), name), ";;".join(filters))
+        dlg.setAcceptMode(QFileDialog.AcceptSave)
+        dlg.setDefaultSuffix(suffix)
+        if not dlg.exec():
+            return None
+        files = dlg.selectedFiles()
+        return os.path.normpath(files[0]) if files else None
+
+    @staticmethod
+    def _has(path):
+        return bool(path and os.path.exists(path))
+
+    def _wav_source(self):
+        """A WAV of the last generation, or an MP3 to convert (online engines without effects)."""
+        for f in (self._temp_save_file, self._temp_playback_file):
+            if self._has(f) and f.lower().endswith(".wav"):
+                return f
+        return self._temp_save_file if self._has(self._temp_save_file) else None
+
+    def _on_save(self, fmt="mp3"):
+        """Save menu → MP3 or WAV. The SRT, when there is one, goes beside it."""
+        src = self._temp_mp3 if fmt == "mp3" else self._wav_source()
+        if not self._has(src):
             self.set_status("⚠  No audio to save — generate first", COLORS["warning"])
             return
-        has_mp3 = bool(self._temp_mp3 and os.path.exists(self._temp_mp3))
-        if has_mp3:
-            default_ext = ".mp3"
-            ftypes = [("MP3 Audio", "*.mp3"), ("WAV Audio", "*.wav"), ("All Files", "*.*")]
-        else:
-            default_ext = ".wav"
-            ftypes = [("WAV Audio", "*.wav"), ("All Files", "*.*")]
-
-        # New filename convention: First_three_word_of_input_timestamp
-        text = self._text_panel.get_text().strip()
-        words = re.findall(r'\w+', text)
-        prefix = "_".join(words[:3]) if words else "adits_voice_studio"
-        ts = time.strftime('%Y%m%d_%H%M%S')
-        initial_name = f"{prefix}_{ts}{default_ext}"
-
-        output_dir = str(paths.output_dir())
-        filepath = filedialog.asksaveasfilename(
-            title="Save Speech Audio",
-            defaultextension=default_ext,
-            filetypes=ftypes,
-            initialdir=output_dir,
-            initialfile=initial_name,
-        )
+        ext = "." + fmt
+        filters = [f"{fmt.upper()} Audio (*{ext})", "All Files (*.*)"]
+        filepath = self._ask_save_path(f"Save Speech Audio ({fmt.upper()})",
+                                       self._default_name("adits_voice_studio", ext), filters, fmt)
         if not filepath:
             return
         try:
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            src = self._temp_mp3 if (filepath.lower().endswith(".mp3") and has_mp3) else sf
-            shutil.copy2(src, filepath)
-            
-            # Save SRT if it exists
+            if fmt == "wav" and not src.lower().endswith(".wav"):
+                from core.audio_io import load_segment
+                load_segment(src).export(filepath, format="wav")
+            else:
+                shutil.copy2(src, filepath)
             if self._temp_srt and os.path.exists(self._temp_srt):
-                srt_path = os.path.splitext(filepath)[0] + ".srt"
-                shutil.copy2(self._temp_srt, srt_path)
-                self.set_status(f"💾  Saved audio & subtitles to {os.path.basename(filepath)}", COLORS["success"])
+                shutil.copy2(self._temp_srt, os.path.splitext(filepath)[0] + ".srt")
+                self.set_status(f"💾  Saved audio & subtitles to {os.path.basename(filepath)}",
+                                COLORS["success"])
             else:
                 self.set_status(f"💾  Saved to {os.path.basename(filepath)}", COLORS["success"])
-
             self._final_saved_file = filepath
-            self._play_panel.open_folder_btn.configure(state="normal")
         except Exception as e:
             self.set_status(f"❌  Save error: {e}", COLORS["error"])
 
@@ -539,34 +559,19 @@ class AditsVoiceStudioApp(ctk.CTk):
         if not sf or not os.path.exists(sf):
             self.set_status("⚠  No subtitle to save", COLORS["warning"])
             return
-
-        text = self._text_panel.get_text().strip()
-        words = re.findall(r'\w+', text)
-        prefix = "_".join(words[:3]) if words else "subtitles"
-        ts = time.strftime('%Y%m%d_%H%M%S')
-        initial_name = f"{prefix}_{ts}.srt"
-
-        output_dir = str(paths.output_dir())
-        filepath = filedialog.asksaveasfilename(
-            title="Save Subtitles (SRT)",
-            defaultextension=".srt",
-            filetypes=[("SRT Subtitles", "*.srt"), ("All Files", "*.*")],
-            initialdir=output_dir,
-            initialfile=initial_name,
-        )
+        filepath = self._ask_save_path("Save Subtitles (SRT)", self._default_name("subtitles", ".srt"),
+                                       ["SRT Subtitles (*.srt)", "All Files (*.*)"], "srt")
         if not filepath:
             return
         try:
             shutil.copy2(sf, filepath)
             self._final_saved_file = filepath
-            self._play_panel.open_folder_btn.configure(state="normal")
             self.set_status(f"💾  Saved SRT to {os.path.basename(filepath)}", COLORS["success"])
         except Exception as e:
             self.set_status(f"❌  Save error: {e}", COLORS["error"])
 
     def _on_open_folder(self):
-        # Before the first save, open the save folder rather than the temp
-        # dir, which is deleted on the next generation.
+        # Before the first save, open the save folder rather than the temp dir.
         target = self._final_saved_file
         try:
             if target and os.path.exists(target):
@@ -576,77 +581,55 @@ class AditsVoiceStudioApp(ctk.CTk):
         except Exception as e:
             self.set_status(f"❌  Could not open folder: {e}", COLORS["error"])
 
-    # ──────────────────────────────────────────────────────────────
-    #  CLEANUP
-    # ──────────────────────────────────────────────────────────────
-
+    # ── closing ────────────────────────────────────────────────────
     def _cleanup_tmp_dirs(self):
-        """Delete every temp dir this session created (also runs via atexit)."""
         for d in list(self._tmp_dirs):
             shutil.rmtree(d, ignore_errors=True)
             self._tmp_dirs.discard(d)
-        pf = self._temp_playback_file
-        if pf:
-            shutil.rmtree(os.path.dirname(pf), ignore_errors=True)
 
-    # ──────────────────────────────────────────────────────────────
-    #  CLONED VOICES
-    # ──────────────────────────────────────────────────────────────
-
-    def refresh_cloned_voices(self, select=None):
-        """Re-read the voice library into the registry, the tiles and the Clone Voice group.
-
-        select: slug of a voice to switch on afterwards (e.g. just created).
-        """
-        from effects.cloned_voices import refresh_cloned_voices
-        try:
-            refresh_cloned_voices(EFFECTS_REGISTRY)
-        except Exception as e:
-            print(f"Cloned voice refresh failed: {e}")
-        self._effects_panel.sync()
-        group = self._cust_panel.clone_group
-        if group is not None:
-            group.refresh()
-        if select:
-            self._effects_panel.set_active(f"clone:{select}", True)
-
-    def _open_voice_manager(self):
-        from ui.panels.clone_voice_dialog import ManageVoicesDialog
-        win = getattr(self, "_voice_manager", None)
-        if win is not None and win.winfo_exists():
-            win.lift()
-            win.focus_force()
-            return
-        self._voice_manager = ManageVoicesDialog(self)
-
-    def _on_close(self):
+    def closeEvent(self, event):
+        import pygame
+        import core.voice_cloning as voice_cloning
         if voice_cloning.is_training():
-            if not messagebox.askyesno(
-                    "Voice training in progress",
-                    "A cloned voice is still training.\n\n"
-                    "Closing Adits Voice Studio stops the training and discards it. Close anyway?",
-                    icon="warning", parent=self):
+            answer = QMessageBox.warning(
+                self, "Voice training in progress",
+                "A cloned voice is still training.\n\n"
+                "Closing Adits Voice Studio stops the training and discards it. Close anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if answer != QMessageBox.Yes:
+                event.ignore()
                 return
         self._stop_event.set()
-        self.destroy()
-
-    def destroy(self):
+        self._play_timer.stop()
+        cust = self._cust_panel                 # None if closed while the engines load
+        if cust is not None and cust.clone_group is not None:
+            cust.clone_group.cleanup()      # stops clone tasks and previews
+        self._text_panel.cleanup()          # closes the dictation mic, stops a transcription
         try:
             pygame.mixer.quit()
         except Exception:
             pass
-        # Stop clone tasks/preview, then the worker processes (no-op if none started).
-        group = getattr(getattr(self, "_cust_panel", None), "clone_group", None)
-        if group is not None:
-            group.cleanup()
-        text_panel = getattr(self, "_text_panel", None)
-        if text_panel is not None:
-            text_panel.cleanup()            # closes the dictation mic, stops a transcription
         try:
             voice_cloning.shutdown_client()
         except Exception as e:
             print(f"Voice cloning shutdown failed: {e}")
         self._cleanup_tmp_dirs()
-        if hasattr(self, '_cust_panel') and hasattr(self._cust_panel, 'cleanup'):
-            self._cust_panel.cleanup()
-        super().destroy()
+        if cust is not None:
+            cust.cleanup()                  # ambiance preview temp files
+        event.accept()
+
+
+def run(on_shown=None) -> int:
+    """Start the Qt UI; returns the exit code. on_shown runs once the window is up."""
+    import atexit
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setFont(theme.font("body"))
+    app.setStyleSheet(theme.stylesheet())
+    bridge.install()
+    win = MainWindow()
+    atexit.register(win._cleanup_tmp_dirs)
+    win.show()
+    if on_shown:
+        QTimer.singleShot(0, on_shown)
+    return app.exec()

@@ -1,5 +1,5 @@
 """
-ui_qt/icons.py
+ui/icons.py
 ──────────────
 Line icons for the Qt window, in place of emoji.
 
