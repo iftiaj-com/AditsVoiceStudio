@@ -135,6 +135,7 @@ class EffectsPanel:
         self._fav_labels: dict = {}     # key -> mirror switch
         self._hearts: dict = {}         # key -> heart on the original tile
         self._fav_hearts: dict = {}     # key -> heart on the mirror tile
+        self._fav_subscribers: list = []  # callback() after Favourites change
         for effect in EFFECTS_REGISTRY:
             self._add_tile(effect)
         self._regrid()
@@ -231,12 +232,25 @@ class EffectsPanel:
         self._paint_hearts(key)
         save_favourites(self._fav_keys)
         self._regrid()
+        self._notify_favourites()
+
+    def subscribe_favourites(self, callback):
+        """callback() after a key is added to or removed from Favourites."""
+        self._fav_subscribers.append(callback)
+
+    def _notify_favourites(self):
+        for cb in self._fav_subscribers:
+            try:
+                cb()
+            except Exception as e:
+                print(f"Favourites subscriber failed: {e}")
 
     def _remove_tile(self, key):
         self._remove_mirror(key)
         if key in self._fav_keys:               # the effect is gone (a deleted voice)
             self._fav_keys.remove(key)
             save_favourites(self._fav_keys)
+            self._notify_favourites()
         tile = self._tiles.pop(key, None)
         if tile is not None:
             tile.destroy()

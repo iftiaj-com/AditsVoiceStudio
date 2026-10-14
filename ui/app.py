@@ -885,6 +885,9 @@ class AditsVoiceStudioApp(ctk.CTk):
         group = getattr(getattr(self, "_cust_panel", None), "clone_group", None)
         if group is not None:
             group.cleanup()
+        text_panel = getattr(self, "_text_panel", None)
+        if text_panel is not None:
+            text_panel.cleanup()            # closes the dictation mic, stops a transcription
         try:
             voice_cloning.shutdown_client()
         except Exception as e:

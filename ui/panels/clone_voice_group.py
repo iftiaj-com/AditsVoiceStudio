@@ -38,6 +38,7 @@ from core.audio_io import AUDIO_EXTENSIONS
 from core.constants import COLORS, FONTS
 from core.voice_cloning import estimate, library, pitch, previews, runtime
 from core.voice_cloning.errors import VCCancelled, VCError, VCWorkerError
+from ui.panels.effects_panel import HEART_FONT, HEART_OFF, HEART_ON
 from ui.theme import styled_slider
 
 CLONE_GROUP = "clone"
@@ -148,6 +149,170 @@ class _Tip:
             except tk.TclError:
                 pass
             self._win = None
+
+
+class _VoiceList(tk.Toplevel):
+    """The open list of the Active voice picker: a scrolling column of names
+    under the picker, with ♥ on the right of each favourite.
+
+    Plain tk widgets, since a list of 60+ CTk rows takes too long to build on
+    every click. Closes on a pick, a click outside, Escape, or lost focus.
+    """
+
+    MAX_ROWS = 12
+
+    def __init__(self, anchor, values, current, is_favourite, on_pick, on_close):
+        super().__init__(anchor.winfo_toplevel())
+        self._on_pick, self._on_close = on_pick, on_close
+        self._closed = False
+        self.withdraw()
+        self.overrideredirect(True)
+        self.transient(anchor.winfo_toplevel())
+        self.configure(bg=COLORS["border"])
+        scale = anchor._get_widget_scaling()
+        px = lambda v: max(1, round(v * scale))
+        font = (FONTS["body"][0], -px(FONTS["body"][1]))
+        heart_font = ("Segoe UI Symbol", -px(15))
+        bg, hover, marked = COLORS["bg_card"], COLORS["accent_primary"], COLORS["bg_input"]
+
+        box = tk.Frame(self, bg=bg)
+        box.pack(fill="both", expand=True, padx=1, pady=1)
+        canvas = tk.Canvas(box, bg=bg, highlightthickness=0, bd=0)
+        inner = tk.Frame(canvas, bg=bg)
+        item = canvas.create_window(0, 0, window=inner, anchor="nw")
+        bar = ctk.CTkScrollbar(box, command=canvas.yview, width=px(12),
+                               fg_color=bg, button_color=COLORS["border"],
+                               button_hover_color=COLORS["accent_primary"])
+        canvas.configure(yscrollcommand=bar.set)
+        self._canvas = canvas
+
+        widgets = [canvas, inner]
+        current_row = None
+        for value in values:
+            base = marked if value == current else bg
+            row = tk.Frame(inner, bg=base)
+            row.pack(fill="x")
+            name = tk.Label(row, text=value, font=font, anchor="w", bg=base,
+                            fg=COLORS["text_primary"], padx=px(10), pady=px(3))
+            heart = tk.Label(row, text=HEART_ON if is_favourite(value) else "", width=2,
+                             font=heart_font, bg=base, fg=COLORS["accent_primary"])
+            heart.pack(side="right", padx=(0, px(4)))
+            name.pack(side="left", fill="x", expand=True)
+            parts = (row, name, heart)
+            for w in parts:
+                w.bind("<Enter>", lambda e, p=parts: [x.configure(bg=hover) for x in p])
+                w.bind("<Leave>", lambda e, p=parts, c=base: [x.configure(bg=c) for x in p])
+                w.bind("<ButtonRelease-1>", lambda e, v=value: self._pick(v))
+            widgets += parts
+            if value == current:
+                current_row = row
+        for w in widgets:
+            w.bind("<MouseWheel>", self._on_wheel)
+
+        # Size and place: the picker's width, up to MAX_ROWS tall, below the
+        # picker, or above it when there is more room there.
+        self.update_idletasks()
+        total = inner.winfo_reqheight()
+        row_h = total / max(1, len(values))
+        width = max(anchor.winfo_width(), px(160))
+        gap = px(2)
+        x, top = anchor.winfo_rootx(), anchor.winfo_rooty()
+        below = self.winfo_screenheight() - (top + anchor.winfo_height() + gap) - px(48)
+        above = top - gap - px(8)
+        want = min(total, round(row_h * self.MAX_ROWS))
+        downward = below >= want or below >= above
+        height = max(round(row_h), min(want, below if downward else above))
+        y = top + anchor.winfo_height() + gap if downward else top - gap - height - 2
+        if total > height:
+            bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(height=height, yscrollincrement=max(1, round(row_h)),
+                         scrollregion=(0, 0, 0, total))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
+        self.geometry(f"{width}x{height + 2}+{x}+{y}")
+        if current_row is not None and total > height:
+            first = current_row.winfo_y() - (height - row_h) / 2
+            canvas.yview_moveto(max(0.0, first) / total)
+
+        self.bind("<ButtonPress>", self._on_press)
+        self.bind("<Escape>", lambda e: self.close())
+        self.bind("<FocusOut>", self._on_focus_out)
+        self.deiconify()
+        self.lift()
+        try:
+            self.focus_force()
+            self.grab_set()
+        except tk.TclError:
+            pass
+
+    def _on_wheel(self, event):
+        self._canvas.yview_scroll(int(-event.delta / 120 * 3), "units")
+        return "break"      # keeps the right column's wheel handler out of it
+
+    def _inside(self, x, y):
+        w = self.winfo_containing(x, y)
+        return w is not None and w.winfo_toplevel() is self
+
+    def _on_press(self, event):
+        if not self._inside(event.x_root, event.y_root):
+            self.close()
+
+    def _on_focus_out(self, event):
+        if event.widget is self:
+            self.after(1, self._check_focus)
+
+    def _check_focus(self):
+        if self._closed:
+            return
+        try:
+            f = self.focus_get()
+        except (KeyError, tk.TclError):
+            f = None
+        if f is None or f.winfo_toplevel() is not self:
+            self.close()
+
+    def _pick(self, value):
+        if self._closed:
+            return
+        self.close()
+        self._on_pick(value)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.grab_release()
+            self.destroy()
+        except tk.TclError:
+            pass
+        self._on_close()
+
+
+class _VoiceMenu(ctk.CTkOptionMenu):
+    """The Active voice picker. Opens _VoiceList instead of CTk's tk.Menu,
+    which on Windows scrolls only through arrow rows and has no room for a
+    favourite mark. is_favourite(value) says which names get ♥."""
+
+    def __init__(self, *args, is_favourite=None, **kwargs):
+        self._is_favourite = is_favourite or (lambda value: False)
+        self._list = None
+        super().__init__(*args, **kwargs)
+
+    def _open_dropdown_menu(self):
+        if self._list is not None:
+            self._list.close()
+            return
+        self._list = _VoiceList(self, list(self._values), self._current_value, self._is_favourite,
+                                on_pick=self._dropdown_callback, on_close=self._list_closed)
+
+    def _list_closed(self):
+        self._list = None
+
+    def destroy(self):
+        if self._list is not None:
+            self._list.close()
+        super().destroy()
 
 
 class CloneVoiceGroup:
@@ -324,12 +489,22 @@ class CloneVoiceGroup:
         self._mode_tag = _small(b, "", COLORS["text_muted"], anchor="e")
         self._mode_tag.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, 4))
         self._voice_var = ctk.StringVar(value="None")
-        self._voice_menu = ctk.CTkOptionMenu(
-            b, variable=self._voice_var, values=["None"], command=self._on_voice_pick,
+        pick_row = ctk.CTkFrame(b, fg_color="transparent")
+        pick_row.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self._voice_menu = _VoiceMenu(
+            pick_row, variable=self._voice_var, values=["None"], command=self._on_voice_pick,
+            is_favourite=self._label_is_favourite,
             font=FONTS["body"], fg_color=COLORS["bg_input"], button_color=COLORS["accent_primary"],
             button_hover_color=COLORS["accent_secondary"], dropdown_fg_color=COLORS["bg_card"],
             dropdown_hover_color=COLORS["accent_primary"], corner_radius=8, width=220, height=30)
-        self._voice_menu.grid(row=1, column=0, columnspan=3, sticky="ew")
+        # Favourite toggle for the voice shown, the same as the ♡ on its Voice Effects tile.
+        self._fav_btn = ctk.CTkButton(pick_row, text=HEART_OFF, font=HEART_FONT, width=32, height=30,
+                                      corner_radius=6, fg_color="transparent",
+                                      hover_color=COLORS["bg_input"], text_color=COLORS["text_muted"],
+                                      command=self._on_fav_click, state="disabled")
+        self._fav_btn.pack(side="right", padx=(4, 0))
+        self._voice_menu.pack(side="left", fill="x", expand=True)
+        _Tip(self._fav_btn, "Add this voice to Favourites in Voice Effects, or remove it.")
         self._empty_hint = _small(b, "Switch on a cloned voice here or in Voice Effects.",
                                   COLORS["text_muted"], anchor="w")
         self._empty_hint.grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
@@ -788,6 +963,7 @@ class CloneVoiceGroup:
         """Link to the Voice Effects card (built after Customization)."""
         self.effects = effects_panel
         effects_panel.subscribe(CLONE_GROUP, self._on_active_changed)
+        effects_panel.subscribe_favourites(self._paint_fav)
         self._on_active_changed(effects_panel.active_in_group(CLONE_GROUP))
 
     def _ui(self, fn, *args):
@@ -873,6 +1049,22 @@ class CloneVoiceGroup:
         else:
             self.effects.clear_group(CLONE_GROUP)
 
+    def _label_is_favourite(self, label):
+        slug = self._names.get(label)
+        return bool(slug and self.effects and self.effects.is_favourite(KEY_PREFIX + slug))
+
+    def _on_fav_click(self):
+        if self.effects is not None and self._active_slug:
+            self.effects.toggle_favourite(KEY_PREFIX + self._active_slug)
+
+    def _paint_fav(self):
+        """Fill the picker's heart when the voice shown is a favourite."""
+        on = bool(self._active_slug and self.effects
+                  and self.effects.is_favourite(KEY_PREFIX + self._active_slug))
+        self._fav_btn.configure(text=HEART_ON if on else HEART_OFF,
+                                text_color=COLORS["accent_primary"] if on else COLORS["text_muted"],
+                                state="normal" if self._active_slug else "disabled")
+
     def _on_active_changed(self, key):
         slug = key[len(KEY_PREFIX):] if key else None
         newly_on = slug is not None and slug != self._active_slug
@@ -888,6 +1080,7 @@ class CloneVoiceGroup:
                 self._active_profile = None
         p = self._active_profile
         self._sync_picker()
+        self._paint_fav()
         self._show_base(p)
         if p is not None and newly_on:
             self._apply_base(p)

@@ -31,6 +31,44 @@ def get_whisper_model():
     return MODEL_CACHE.get(_WHISPER_KEY, _load)
 
 
+def transcribe_file(path, on_segment, check_cancel=None, status_cb=None):
+    """Transcribe an audio or video file, calling on_segment(start, end, text,
+    duration) for each segment as Whisper finishes it. The language is
+    detected. Returns faster-whisper's info (language, duration).
+
+    Whisper decodes the file itself (PyAV); a file it cannot open goes through
+    core.audio_io.load_segment(), which also tries libsndfile.
+    Raises SubtitleCancelled when check_cancel() turns True.
+    """
+    import numpy as np
+
+    def _cancelled():
+        return check_cancel is not None and check_cancel()
+
+    if status_cb:
+        status_cb("Loading transcription model...")
+    model = get_whisper_model()
+    if _cancelled():
+        raise SubtitleCancelled()
+    if status_cb:
+        status_cb("Reading the file...")
+    try:
+        segments, info = model.transcribe(str(path), vad_filter=True)
+    except Exception:
+        from core.audio_io import load_segment
+        seg = load_segment(str(path)).set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        audio = np.frombuffer(seg.raw_data, dtype=np.int16).astype(np.float32) / 32768.0
+        segments, info = model.transcribe(audio, vad_filter=True)
+    if status_cb:
+        status_cb("Transcribing...")
+    for segment in segments:                # lazy: each step decodes one segment
+        if _cancelled():
+            raise SubtitleCancelled()
+        MODEL_CACHE.touch(_WHISPER_KEY)     # a long file must not be evicted mid-run
+        on_segment(segment.start, segment.end, segment.text, info.duration)
+    return info
+
+
 def unload_whisper_model():
     """Manually release the Whisper model (RAM + VRAM)."""
     MODEL_CACHE.clear(_WHISPER_KEY)

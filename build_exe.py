@@ -45,6 +45,7 @@ _REQUIRED = {
     "soundfile":      "audio I/O and MP3 export",
     "pyaudio":        "Clone Voice microphone recording",
     "av":             "Clone Voice clip import (M4A, AAC, WebM, WMA...)",
+    "pysubs2":        "Text Input caption import",
 }
 
 # Left out of the public build on purpose:
