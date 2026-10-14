@@ -1174,7 +1174,7 @@ class CloneVoiceGroup:
             self._active_est.configure(text="")
             return
         try:
-            text = self.app._text_panel.get_text()
+            text = self.app.text_panel.get_text()
         except Exception:
             text = ""
         speech = estimate.speech_seconds(text)
@@ -1208,7 +1208,7 @@ class CloneVoiceGroup:
     # ── create page state ──────────────────────────────────────────
     def _engine_selection(self):
         try:
-            return self.app._engine_panel.get_voice_selection()
+            return self.app.engine_panel.get_voice_selection()
         except Exception:
             return None
 
@@ -1243,14 +1243,14 @@ class CloneVoiceGroup:
         from ui.panels.engine_panel import EnginePanel
         sel = self._selection_for(p)
         if not sel:
-            self.app._set_status(f"ℹ  '{p.name}' has no base voice yet. Pick an engine voice and press "
+            self.app.set_status(f"ℹ  '{p.name}' has no base voice yet. Pick an engine voice and press "
                                  "Use current in Clone Voice.", COLORS["text_secondary"])
             return
-        err = self.app._engine_panel.apply_voice_selection(sel)
+        err = self.app.engine_panel.apply_voice_selection(sel)
         if err:
-            self.app._set_status(f"⚠  Base voice for '{p.name}' not selected: {err}", COLORS["warning"])
+            self.app.set_status(f"⚠  Base voice for '{p.name}' not selected: {err}", COLORS["warning"])
         else:
-            self.app._set_status(f"🔁  TTS Engine set to {EnginePanel.describe_selection(sel)}, "
+            self.app.set_status(f"🔁  TTS Engine set to {EnginePanel.describe_selection(sel)}, "
                                  f"the base voice of '{p.name}'", COLORS["accent_primary"])
         self._update_create()
 
@@ -1265,12 +1265,12 @@ class CloneVoiceGroup:
         self._active_profile = p
         self._show_base(p)
         hint = " Press 🎯 Match to re-measure the pitch." if p.mode == "rvc" and p.clips else ""
-        self.app._set_status(f"✅  Base voice of '{p.name}' set to "
+        self.app.set_status(f"✅  Base voice of '{p.name}' set to "
                              f"{EnginePanel.describe_selection(sel)}.{hint}", COLORS["success"])
 
     def _base_voice(self):
         try:
-            s = self.app._engine_panel.get_settings()
+            s = self.app.engine_panel.get_settings()
         except Exception:
             return "", "", None
         name = s["engine_name"]
@@ -1463,7 +1463,7 @@ class CloneVoiceGroup:
         if path != self._pl_path:
             return                          # another clip was picked meanwhile
         if error is not None:
-            self.app._set_status(f"⚠  Could not play {os.path.basename(path)}: {error}", COLORS["warning"])
+            self.app.set_status(f"⚠  Could not play {os.path.basename(path)}: {error}", COLORS["warning"])
             return
         self._pl_seg = seg
         self._pl_seek.configure(to=max(0.1, self._clip_duration()))
@@ -1666,7 +1666,7 @@ class CloneVoiceGroup:
 
     def _fail(self, name, message, hint):
         self._end(f"❌  {name} failed: {message}", COLORS["error"], keep_seconds=30)
-        self.app._set_status(f"❌  {name} failed: {message}", COLORS["error"])
+        self.app.set_status(f"❌  {name} failed: {message}", COLORS["error"])
         messagebox.showerror(f"{name} failed", message + (f"\n\n{hint}" if hint else ""), parent=self.app)
 
     def _check_cancel(self):
@@ -1679,18 +1679,12 @@ class CloneVoiceGroup:
         cancel: the Event that aborts it (default: this group's Cancel button).
         """
         import numpy as np
-        import torch
         from core.audio_io import load_segment
-        app = self.app
+        synth = self.app.synth
         cancel = cancel or self._cancel
-        engine = app._engine_map.get(eng_settings["engine_name"])
-        if engine is None:
+        if eng_settings["engine_name"] not in synth.engine_map:
             raise VCError("The selected TTS engine is not available.")
-        use_gpu = eng_settings["use_gpu"] and torch.cuda.is_available()
-        kwargs = app._engine_kwargs(eng_settings, "cuda" if use_gpu else "cpu",
-                                    lambda m: None, cancel.is_set)
-        with app._engine_lock:
-            res = engine.synthesize(text, tmp, **kwargs)
+        res = synth.synthesize(text, tmp, eng_settings, check_cancel=cancel.is_set)
         if cancel.is_set():
             raise VCCancelled()
         seg = load_segment(res["playback_file"]).set_channels(1)
@@ -1757,7 +1751,7 @@ class CloneVoiceGroup:
             self._run("Create voice", "Preparing the reference voice…",
                       lambda: self._do_quick(name, clips, eng, voice, base_sel, prep, eng_settings, match))
         else:
-            if self.app._is_generating:
+            if self.app.is_generating:
                 messagebox.showinfo("Busy", "Wait for the current generation to finish, then start training.",
                                     parent=self.app)
                 return
@@ -1777,7 +1771,7 @@ class CloneVoiceGroup:
             self._index_label.configure(text="Optional", text_color=COLORS["text_muted"])
             self._tabs_var.set("Active voice")
             self._on_tab("Active voice")
-            self.app._set_status(f"✅  {msg}", COLORS["success"])
+            self.app.set_status(f"✅  {msg}", COLORS["success"])
         self._ui(ui)
         return f"✅  {msg}"
 
@@ -1967,7 +1961,7 @@ class CloneVoiceGroup:
     def saved_fingerprint(self, p):
         """Fingerprint of *p*'s preview with its saved base and sound, or None without a usable base."""
         from ui.panels.engine_panel import EnginePanel
-        eng, err = self.app._engine_panel.settings_for_selection(self._selection_for(p))
+        eng, err = self.app.engine_panel.settings_for_selection(self._selection_for(p))
         if err:
             return None
         return previews.fingerprint(p, EnginePanel.synthesis_key(eng), previews.sound_of(p))
@@ -1989,7 +1983,7 @@ class CloneVoiceGroup:
         saved = previews.cached(p.slug, fp)
         if saved:                               # made before with exactly these settings
             if self._play_active_preview(saved):
-                self.app._set_status(f"▶  Playing the saved preview of '{p.name}'", COLORS["success"])
+                self.app.set_status(f"▶  Playing the saved preview of '{p.name}'", COLORS["success"])
             return
         keep = fp == self.saved_fingerprint(p)  # the voice's own settings: worth saving
 
@@ -2015,7 +2009,7 @@ class CloneVoiceGroup:
             return
         if not p.is_ready or self._busy:
             return
-        eng, err = self.app._engine_panel.settings_for_selection(self._selection_for(p))
+        eng, err = self.app.engine_panel.settings_for_selection(self._selection_for(p))
         if err:
             return
         sound = previews.sound_of(p)

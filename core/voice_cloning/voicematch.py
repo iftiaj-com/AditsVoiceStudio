@@ -417,15 +417,14 @@ def rate_unit(lang):
 
 # ── building the bank ───────────────────────────────────────────────
 
-def build_bank(app, eng_settings, cands, progress=None, check_cancel=None):
+def build_bank(synth, eng_settings, cands, progress=None, check_cancel=None):
     """Synthesize and measure every candidate missing from the bank. Resumable.
 
-    app: the AditsVoiceStudioApp (engines, _engine_kwargs, _engine_lock).
+    synth: the app's core.synth.Synthesizer.
     eng_settings: EnginePanel.get_settings() snapshot used as defaults.
     progress(fraction, message).
     Returns the bank.
     """
-    import torch
     from core.audio_io import load_segment
     from core.voice_cloning import get_client
     from core.voice_cloning import pitch as pitch_mod
@@ -437,7 +436,6 @@ def build_bank(app, eng_settings, cands, progress=None, check_cancel=None):
     samples.mkdir(parents=True, exist_ok=True)
     todo = missing(bank, cands)              # new, engine changed, or failed in an older version
     t0 = time.monotonic()
-    use_gpu = bool(eng_settings.get("use_gpu")) and torch.cuda.is_available()
 
     for i, c in enumerate(todo):
         if check_cancel:
@@ -451,17 +449,14 @@ def build_bank(app, eng_settings, cands, progress=None, check_cancel=None):
         entry = {"label": c["label"], "kind": c["kind"], "lang": c["lang"], "engine": c["engine"],
                  "fp": engine_fingerprint(c), "app_version": _app_version(),
                  "selection": c["selection"]}
-        engine = app._engine_map.get(c["engine"])
         text = SENTENCES.get(c["lang"] or "en", SENTENCES["en"])
         tmp = Path(bank_dir()) / "tmp"
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         try:
             settings = dict(eng_settings, engine_name=c["engine"], **c["overrides"])
-            kwargs = app._engine_kwargs(settings, "cuda" if use_gpu else "cpu", lambda m: None,
-                                        lambda: bool(check_cancel and _cancelled(check_cancel)))
-            with app._engine_lock:
-                res = engine.synthesize(text, str(tmp), **kwargs)
+            res = synth.synthesize(text, str(tmp), settings,
+                                   check_cancel=lambda: bool(check_cancel and _cancelled(check_cancel)))
             wav = samples / (hashlib.sha1(c["id"].encode()).hexdigest()[:16] + ".wav")
             load_segment(res["playback_file"]).set_channels(1).export(str(wav), format="wav")
             entry.update(wav=wav.name, f0=pitch_mod.median_f0(str(wav), max_seconds=10),
@@ -509,23 +504,19 @@ def speak_settings(eng_settings, cand, speed=None) -> dict:
     return dict(eng_settings, engine_name=cand["engine"], **overrides)
 
 
-def speak(app, eng_settings, cand, text, out_wav, speed=None, check_cancel=None):
+def speak(synth, eng_settings, cand, text, out_wav, speed=None, check_cancel=None):
     """Synthesize text with one candidate voice into a mono WAV at out_wav.
 
     speed: a suggested_speed() value (Kokoro / Melo speed, pyttsx3 WPM); None keeps
     the candidate's default. Used by the analyzer's Result (the clip's transcript).
     """
     import tempfile
-    import torch
     from core.audio_io import load_segment
-    use_gpu = bool(eng_settings.get("use_gpu")) and torch.cuda.is_available()
     settings = speak_settings(eng_settings, cand, speed)
-    kwargs = app._engine_kwargs(settings, "cuda" if use_gpu else "cpu", lambda m: None,
-                                lambda: bool(check_cancel and _cancelled(check_cancel)))
     tmp = tempfile.mkdtemp(prefix="adits_vs_speak_", dir=os.path.dirname(str(out_wav)))
     try:
-        with app._engine_lock:
-            res = app._engine_map[cand["engine"]].synthesize(text, tmp, **kwargs)
+        res = synth.synthesize(text, tmp, settings,
+                               check_cancel=lambda: bool(check_cancel and _cancelled(check_cancel)))
         load_segment(res["playback_file"]).set_channels(1).export(str(out_wav), format="wav")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

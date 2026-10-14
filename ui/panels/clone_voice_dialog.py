@@ -379,7 +379,7 @@ class ManageVoicesDialog(ctk.CTkToplevel):
 
     @property
     def _group(self):
-        return getattr(getattr(self.app, "_cust_panel", None), "clone_group", None)
+        return getattr(self.app.cust_panel, "clone_group", None)
 
     def _build_rows(self):
         for r in self._rows:
@@ -406,7 +406,7 @@ class ManageVoicesDialog(ctk.CTkToplevel):
 
     def _row(self, i, v):
         from ui.panels.engine_panel import EnginePanel
-        panel = self.app._engine_panel
+        panel = self.app.engine_panel
         row = ctk.CTkFrame(self._list, fg_color=COLORS["bg_input"], corner_radius=10,
                            border_width=1, border_color=COLORS["border"])
         row.grid(row=i, column=0, sticky="ew", padx=6, pady=4)
@@ -502,7 +502,7 @@ class ManageVoicesDialog(ctk.CTkToplevel):
             messagebox.showinfo("Voice is training", f"'{v.name}' is training. Cancel the training "
                                 f"first, then {action} it.", parent=self)
             return True
-        if self.app._is_generating:
+        if self.app.is_generating:
             messagebox.showinfo("Generating", f"Wait for the current generation to finish, then {action} "
                                 "the voice.", parent=self)
             return True
@@ -552,12 +552,12 @@ class ManageVoicesDialog(ctk.CTkToplevel):
         if group is not None and group._active_slug == v.slug:
             group.reload_active(p)              # keep the Clone Voice box in step
             if sel is not None:                 # the voice is on: use the new base now
-                err = self.app._engine_panel.apply_voice_selection(sel)
+                err = self.app.engine_panel.apply_voice_selection(sel)
                 msg += f" (TTS Engine not changed: {err})" if err else ", selected in TTS Engine"
         if sel is not None and editor.f0 is None and v.slug in self._matchable:
             msg += ". Press 🎯 next to Pitch to re-measure it for the new base."
         remake = (sel is not None or sound is not None) and self._update_saved_preview(p)
-        self.app._set_status(msg, COLORS["success"])
+        self.app.set_status(msg, COLORS["success"])
         self._build_rows()
         if remake and group is not None:
             group.refresh_preview(p.slug)       # runs in the Clone Voice box, after this status
@@ -592,7 +592,7 @@ class ManageVoicesDialog(ctk.CTkToplevel):
         library.delete_voice(v.slug)
         self._open.discard(v.slug)
         self.app.refresh_cloned_voices()
-        self.app._set_status(f"🗑  Deleted voice '{v.name}'", COLORS["warning"])
+        self.app.set_status(f"🗑  Deleted voice '{v.name}'", COLORS["warning"])
         self._build_rows()
 
     # ── preview and pitch match ─────────────────────────────────────
@@ -649,11 +649,11 @@ class ManageVoicesDialog(ctk.CTkToplevel):
             editor.status.configure(text=f"Clone Voice is busy ({group._task_name}). Try again when "
                                          "it finishes.", text_color=COLORS["warning"])
             return None
-        if self.app._is_generating:
+        if self.app.is_generating:
             editor.status.configure(text="Wait for the current generation to finish.",
                                     text_color=COLORS["warning"])
             return None
-        eng, err = self.app._engine_panel.settings_for_selection(editor.selection())
+        eng, err = self.app.engine_panel.settings_for_selection(editor.selection())
         if err:
             editor.status.configure(text=f"Can't {verb}: {err}.", text_color=COLORS["error"])
             return None
@@ -670,7 +670,7 @@ class ManageVoicesDialog(ctk.CTkToplevel):
     def _fingerprint(self, v, editor):
         """(fingerprint, engine settings, profile) of a preview with the editor's values, or None."""
         from ui.panels.engine_panel import EnginePanel
-        eng, err = self.app._engine_panel.settings_for_selection(editor.selection())
+        eng, err = self.app.engine_panel.settings_for_selection(editor.selection())
         if err:
             return None
         try:
