@@ -157,6 +157,52 @@ _ONNX_MODEL_NAME  = "kokoro-v1.0.onnx"
 _ONNX_VOICES_NAME = "voices.bin"
 
 
+def _onnx_has_cuda():
+    try:
+        import onnxruntime as ort
+        return "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception:
+        return False
+
+
+_HF_REPO = "hexgrad/Kokoro-82M"
+_TORCH_MODEL_NAME = "kokoro-v1_0.pth"
+
+
+def _cached(filename):
+    """A file of the Kokoro repo already on disk: models/ in the app, else the HF cache."""
+    local = paths.bundle_dir() / "models" / ("voices" if filename.startswith("voices/") else "kokoro") \
+        / filename.split("/")[-1]
+    if local.is_file():
+        return str(local)
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        hit = try_to_load_from_cache(_HF_REPO, filename)
+        return hit if isinstance(hit, str) and os.path.isfile(hit) else None
+    except Exception:
+        return None
+
+
+def _torch_weights():
+    """(config, model) for KModel when both are on disk, else None (no 330 MB surprise download)."""
+    config, model = _cached("config.json"), _cached(_TORCH_MODEL_NAME)
+    return (config, model) if config and model else None
+
+
+def _prefer_torch(device_str):
+    """GPU wanted, but onnxruntime here is the CPU build: use the PyTorch backend.
+
+    Measured on a GTX 1650 for a 9.6 s paragraph: PyTorch on CUDA 0.47 s once
+    loaded, kokoro-onnx on the CPU 8.1 s. The PyTorch path costs about 30 s
+    the first time (import, weights), so MainWindow warms it in the background.
+    Only when its weights are already on disk; the release build does not
+    bundle them, so it keeps kokoro-onnx until they have been downloaded.
+    """
+    import importlib.util
+    return (device_str == "cuda" and importlib.util.find_spec("kokoro") is not None
+            and not _onnx_has_cuda() and _torch_weights() is not None)
+
+
 def _is_user_copy(path):
     return paths.FROZEN and os.path.dirname(os.path.abspath(path)) == \
         os.path.abspath(str(paths.user_dir("models")))
@@ -188,6 +234,7 @@ class KokoroEngine(BaseTTSEngine):
     def __init__(self):
         self._pipelines = {}   # (kind, lang_or_device) -> pipeline
         self._shared_model = None
+        self._shared_device = None
 
     @staticmethod
     def is_available() -> bool:
@@ -221,6 +268,14 @@ class KokoroEngine(BaseTTSEngine):
             else:
                 os.remove(model_path)
 
+        if _prefer_torch(device_str):
+            try:
+                return self._torch_pipeline(lang_code, device_str, status_cb)
+            except Exception as torch_err:
+                print(f"Kokoro PyTorch on {device_str} failed, using ONNX: {torch_err}")
+                if status_cb:
+                    status_cb("⚠ Kokoro GPU backend failed — using ONNX on the CPU.")
+
         # Prefer local ONNX pipeline if weights exist to avoid Hugging Face network freezes
         if os.path.exists(model_path):
             try:
@@ -242,17 +297,7 @@ class KokoroEngine(BaseTTSEngine):
                 print(f"Failed to load local ONNX pipeline: {onnx_err}. Falling back to PyTorch...")
 
         try:
-            from kokoro import KPipeline, KModel
-            if status_cb:
-                status_cb(f"Loading Kokoro {lang_code} pipeline…")
-
-            if self._shared_model is None:
-                self._shared_model = KModel().to(device_str).eval()
-
-            pipeline = KPipeline(lang_code=lang_code, model=self._shared_model)
-            self._pipelines[torch_key] = pipeline
-            self._use_onnx = False
-            return pipeline
+            return self._torch_pipeline(lang_code, device_str, status_cb)
         except Exception as torch_err:
             # Fall back to kokoro-onnx (v1.0)
             print(f"Kokoro PyTorch load failed, using ONNX fallback: {torch_err}")
@@ -283,6 +328,26 @@ class KokoroEngine(BaseTTSEngine):
             self._pipelines[onnx_key] = pipeline
             self._use_onnx = True
             return pipeline
+
+    def _torch_pipeline(self, lang_code, device_str, status_cb=None):
+        from kokoro import KPipeline, KModel
+        if status_cb:
+            status_cb(f"Loading Kokoro {lang_code} pipeline on {device_str}…")
+        if self._shared_model is None or self._shared_device != device_str:
+            weights = _torch_weights()
+            model = (KModel(repo_id=_HF_REPO, config=weights[0], model=weights[1]) if weights
+                     else KModel(repo_id=_HF_REPO))
+            self._shared_model = model.to(device_str).eval()
+            self._shared_device = device_str
+        pipeline = KPipeline(lang_code=lang_code, model=self._shared_model)
+        self._pipelines[("torch", lang_code)] = pipeline
+        self._use_onnx = False
+        return pipeline
+
+    def warm_up(self, **kwargs):
+        """Load the pipeline the next synthesize() with these settings will use."""
+        self._get_pipeline(kwargs.get("kokoro_lang_code", "a"), kwargs.get("device", "cpu"),
+                           kwargs.get("status_cb"), kwargs.get("check_cancel"))
 
     def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
         import numpy as np
@@ -345,13 +410,28 @@ class KokoroEngine(BaseTTSEngine):
                                           lang=onnx_lang_map.get(lang_code, 'en-us'))
             final_audio = samples
         else:
-            generator = pipeline(text, voice=voice_id, speed=speed, split_pattern=r'\n+')
             audio_chunks = []
-            for _, _, audio in generator:
-                if check_cancel():
-                    return {"playback_file": None, "save_file": None, "save_ext": ".wav"}
-                if audio is not None:
-                    audio_chunks.append(audio)
+            try:
+                voice = _cached(f"voices/{voice_id}.pt") or voice_id   # a path skips the HF lookup
+                generator = pipeline(text, voice=voice, speed=speed, split_pattern=r'\n+')
+                for _, _, audio in generator:
+                    if check_cancel():
+                        return {"playback_file": None, "save_file": None, "save_ext": ".wav"}
+                    if audio is not None:
+                        audio_chunks.append(audio.cpu().numpy() if hasattr(audio, "cpu") else audio)
+            except Exception as torch_err:
+                # e.g. a voice pack that is not cached yet, offline. ONNX has every voice.
+                print(f"Kokoro PyTorch synthesis failed, using ONNX: {torch_err}")
+                if status_cb:
+                    status_cb("⚠ Kokoro GPU backend failed — using ONNX on the CPU.")
+                model_path, voices_path = _weight_paths()
+                onnx = self._pipelines.get(("onnx", "cpu")) or _create_onnx_pipeline(
+                    model_path, voices_path, "cpu", status_cb)
+                self._pipelines[("onnx", "cpu")] = onnx
+                onnx_lang_map = {'a': 'en-us', 'b': 'en-gb', 'e': 'es', 'f': 'fr-fr',
+                                 'h': 'hi', 'i': 'it', 'p': 'pt-br', 'j': 'ja', 'z': 'zh'}
+                audio_chunks = [onnx.create(text, voice=voice_id, speed=speed,
+                                            lang=onnx_lang_map.get(lang_code, 'en-us'))[0]]
 
             if not audio_chunks:
                 raise RuntimeError("Kokoro generated empty audio.")

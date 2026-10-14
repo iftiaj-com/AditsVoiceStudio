@@ -873,10 +873,17 @@ when frozen, the repo root from source). The frozen self-test imports
 
 | Backend | Weights | Notes |
 | :--- | :--- | :--- |
-| ONNX (preferred) | `kokoro-v1.0.onnx` + `voices.bin` in the project root | Needs `kokoro-onnx`. Avoids a Hugging Face round trip on startup. |
-| PyTorch (fallback) | `hexgrad/Kokoro-82M` via the HF cache | Needs `kokoro` + `misaki`. Slower to load. |
+| ONNX (CPU, and the fallback) | `kokoro-v1.0.onnx` + `voices.bin` in the project root | Needs `kokoro-onnx`. Avoids a Hugging Face round trip on startup. |
+| PyTorch (GPU) | `models/kokoro/kokoro-v1_0.pth` and `models/voices/*.pt`, else the HF cache of `hexgrad/Kokoro-82M` | Needs `kokoro` + `misaki`. Used when the GPU switch is on, onnxruntime has no CUDA provider (the venv has the CPU build) and the weights are already on disk (`_prefer_torch()`); never downloads them for this. |
 
-`_get_pipeline()` tries ONNX, then PyTorch, then ONNX once more. If everything
+Measured on the GTX 1650, two sentences (9.6 s of audio): PyTorch on CUDA
+0.7 s once loaded, ONNX on the CPU 8.1 s. The first PyTorch run costs about
+22 s (torch import and weights), which the background warm-up hides. A voice
+pack that fails to load on the PyTorch path falls back to ONNX for that call.
+The release build does not bundle `models/`, so an installed copy uses ONNX
+until the weights are in its HF cache.
+
+`_get_pipeline()` tries PyTorch first when `_prefer_torch()` says so, then ONNX, then PyTorch, then ONNX once more. If everything
 fails it raises a single error quoting **both** causes. Do not let the final
 ONNX attempt raise on its own: it hides why PyTorch failed first, which is
 exactly the trap that made a truncated model look like a PyTorch bug.
