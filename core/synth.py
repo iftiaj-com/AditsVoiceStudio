@@ -53,6 +53,28 @@ class Synthesizer:
             kwargs["rate"] = eng_settings["pyttsx3_rate"]
         return kwargs
 
+    def needs_warm_up(self, eng_settings) -> bool:
+        """True if the engine in *eng_settings* has something to load ahead (warm_up())."""
+        from engines.base import BaseTTSEngine
+        engine = self.engine_map.get(eng_settings.get("engine_name"))
+        return engine is not None and type(engine).warm_up is not BaseTTSEngine.warm_up
+
+    def warm_up(self, eng_settings, status_cb=None) -> bool:
+        """Load the engine and voice in *eng_settings* ahead of the first synthesize().
+
+        Holds the lock, so a Generate started meanwhile waits for the load
+        instead of loading the same model a second time. False if the engine
+        has nothing to load or is not available.
+        """
+        if not self.needs_warm_up(eng_settings):
+            return False
+        engine = self.engine_map[eng_settings["engine_name"]]
+        kwargs = self.engine_kwargs(eng_settings, self.device_for(eng_settings),
+                                    status_cb or (lambda m: None), lambda: False)
+        with self.lock:
+            engine.warm_up(**kwargs)
+        return True
+
     def synthesize(self, text, tmp_dir, eng_settings, status_cb=None, check_cancel=None) -> dict:
         """Speak *text* with the engine and voice in *eng_settings*; returns the engine's result dict.
 

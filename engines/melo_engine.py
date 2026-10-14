@@ -88,18 +88,11 @@ class MeloEngine(BaseTTSEngine):
     def is_available() -> bool:
         return _AVAILABLE
 
-    def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
+    def _model(self, **kwargs):
         device_str = kwargs.get("device", "cpu")
         status_cb  = kwargs.get("status_cb", None)
-
-        if status_cb:
-            status_cb(f"Generating MeloTTS speech on {device_str}…")
-
         _ensure_nltk_resources(status_cb)
-
-        voice_cfg  = kwargs.get("melo_voice_cfg", {"language": "EN", "speaker": "EN-US"})
-        language   = voice_cfg.get("language", "EN")
-        speaker    = voice_cfg.get("speaker", "EN-US")
+        language = kwargs.get("melo_voice_cfg", {}).get("language", "EN")
 
         def _load():
             if status_cb:
@@ -107,8 +100,22 @@ class MeloEngine(BaseTTSEngine):
                           "downloads several hundred MB, please wait...")
             return _melo_tts_class()(language=language, device=device_str)
 
-        # Cached per (language, device); idle-evicted by MODEL_CACHE after 5 min.
-        model       = MODEL_CACHE.get(("melo", language, device_str), _load)
+        # Cached per (language, device); idle-evicted by MODEL_CACHE.
+        return MODEL_CACHE.get(("melo", language, device_str), _load)
+
+    def warm_up(self, **kwargs):
+        self._speak_once(**kwargs)
+
+    def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
+        device_str = kwargs.get("device", "cpu")
+        status_cb  = kwargs.get("status_cb", None)
+
+        if status_cb:
+            status_cb(f"Generating MeloTTS speech on {device_str}…")
+
+        voice_cfg  = kwargs.get("melo_voice_cfg", {"language": "EN", "speaker": "EN-US"})
+        speaker    = voice_cfg.get("speaker", "EN-US")
+        model       = self._model(**kwargs)
         speaker_ids = dict(model.hps.data.spk2id)
 
         # Fallback to first available speaker if the requested one isn't in the model

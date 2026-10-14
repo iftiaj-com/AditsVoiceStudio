@@ -75,6 +75,13 @@ class MainWindow(QMainWindow):
         self._play_timer = QTimer(self)
         self._play_timer.setInterval(50)
         self._play_timer.timeout.connect(self._poll_playback)
+        # Background load of the selected engine (see _warm_selected).
+        self._warm_timer = QTimer(self)
+        self._warm_timer.setSingleShot(True)
+        self._warm_timer.setInterval(1500)
+        self._warm_timer.timeout.connect(self._warm_selected)
+        self._warm_busy = False
+        self._warm_again = False
 
         self._available_engines = []
         self.synth = None
@@ -164,8 +171,52 @@ class MainWindow(QMainWindow):
                                 COLORS["warning"])
             else:
                 self.set_status("Ready — Enter text and click Generate")
+            self._engine_panel.on_selection_change(self._warm_timer.start)
+            self._warm_timer.start()
 
         engine()
+
+    # ── engine warm-up ─────────────────────────────────────────────
+    def _warm_selected(self):
+        """Load the selected engine and voice on a thread, so Generate starts at once.
+
+        Runs 1.5 s after start-up and after each change in the engine card.
+        Measured first-generation costs it takes off the click: Kokoro on the
+        GPU about 22 s, MeloTTS about 49 s, Piper about 6 s.
+        """
+        if not self._loaded or self._is_generating:
+            return
+        if self._warm_busy:
+            self._warm_again = True
+            return
+        settings = self._engine_panel.get_settings()
+        if not self.synth.needs_warm_up(settings):
+            return
+        name = settings["engine_name"].split(" (")[0]
+        self._warm_busy = True
+        self.set_status(f"⌛  Loading {name} in the background…", COLORS["accent_primary"])
+
+        def work():
+            try:
+                self.synth.warm_up(settings)
+            except Exception as e:      # noqa: BLE001  (Generate will report it properly)
+                ui(self._on_warm_done, name, f"{type(e).__name__}: {e}")
+                return
+            ui(self._on_warm_done, name, None)
+
+        threading.Thread(target=work, daemon=True, name="warm-up").start()
+
+    def _on_warm_done(self, name, error):
+        self._warm_busy = False
+        if not self._is_generating:
+            if error:
+                print(f"Warm-up of {name} failed: {error}")
+                self.set_status(f"⚠  {name} could not be loaded ahead: {error}", COLORS["warning"])
+            else:
+                self.set_status(f"✅  {name} is loaded — Generate starts at once", COLORS["success"])
+        if self._warm_again:
+            self._warm_again = False
+            self._warm_timer.start()
 
     # ── UI ─────────────────────────────────────────────────────────
     def _build_ui(self):

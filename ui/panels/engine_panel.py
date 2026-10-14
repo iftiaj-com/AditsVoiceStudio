@@ -192,6 +192,12 @@ class EnginePanel:
         for k, frame in self._sub.items():
             frame.setVisible(k == kind)
 
+    def on_selection_change(self, callback):
+        """Call *callback()* when the engine, a voice, a language or the GPU switch changes."""
+        for cb in self.frame.findChildren(QComboBox):
+            cb.currentTextChanged.connect(lambda _t: callback())
+        self._gpu.toggled.connect(lambda _on: callback())
+
     # ── voice selection (used by cloned voices) ────────────────────
     def engine_names(self) -> list:
         """The engines offered in the Engine dropdown."""

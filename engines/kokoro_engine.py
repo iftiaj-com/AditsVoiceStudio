@@ -345,9 +345,7 @@ class KokoroEngine(BaseTTSEngine):
         return pipeline
 
     def warm_up(self, **kwargs):
-        """Load the pipeline the next synthesize() with these settings will use."""
-        self._get_pipeline(kwargs.get("kokoro_lang_code", "a"), kwargs.get("device", "cpu"),
-                           kwargs.get("status_cb"), kwargs.get("check_cancel"))
+        self._speak_once(**kwargs)
 
     def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
         import numpy as np
