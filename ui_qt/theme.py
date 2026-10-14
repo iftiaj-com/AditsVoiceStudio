@@ -210,6 +210,37 @@ QScrollBar::handle:vertical:hover {{ background: {C['accent_primary']}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
+QPushButton[role="seg"] {{
+    background: {C['bg_input']}; border: 1px solid {C['border']}; border-radius: 0;
+    {_px('body_small')} padding: 0 8px; min-height: 0;
+}}
+QPushButton[role="seg"][pos="first"] {{ border-top-left-radius: 7px; border-bottom-left-radius: 7px; }}
+QPushButton[role="seg"][pos="last"] {{ border-top-right-radius: 7px; border-bottom-right-radius: 7px; }}
+QPushButton[role="seg"][pos="only"] {{ border-radius: 7px; }}
+QPushButton[role="seg"]:hover {{ background: {C['border']}; }}
+QPushButton[role="seg"]:checked {{ background: {C['accent_primary']}; border-color: {C['accent_primary']}; }}
+QPushButton[role="seg"][onCard="true"] {{ background: {C['bg_card']}; }}
+QPushButton[role="seg"][onCard="true"]:checked {{ background: {C['accent_primary']}; }}
+
+QFrame#cvTile {{
+    background: {C['bg_card']};
+    border: 1px solid {C['border']};
+    border-radius: 10px;
+}}
+QFrame#cvTile QLabel {{ background: transparent; }}
+QLabel#tileTitle {{ font-family: 'Segoe UI'; font-size: 11px; font-weight: bold; color: {C['text_secondary']}; }}
+QFrame#clipPlayer {{ background: {C['bg_input']}; border-radius: 8px; border: none; }}
+QFrame#clipRow {{ background: {C['bg_input']}; border-radius: 8px; border: none; }}
+
+QPushButton[role="line"] {{
+    background: transparent; border: 1px solid {C['border']}; border-radius: 8px;
+    {_px('button')} padding: 0 10px; min-height: 28px;
+}}
+QPushButton[role="line"]:disabled {{ border-color: {C['border']}; }}
+QCheckBox {{ {_px('body_small')} color: {C['text_secondary']}; spacing: 6px; }}
+QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {C['text_muted']}; border-radius: 3px; background: transparent; }}
+QCheckBox::indicator:checked {{ background: {C['accent_primary']}; border-color: {C['accent_primary']}; }}
+
 QFrame#inset {{
     background: {C['bg_input']};
     border: 1px solid {C['border']};
@@ -324,6 +355,17 @@ def card(title=None):
         lab.setObjectName("cardTitle")
         lay.addWidget(lab)
     return frame, lay
+
+
+def line_button(text, color, tip=None, height=None, small=False):
+    """A transparent button outlined in *color* that fills with it on hover:
+    the Clone Voice group's button style (its CTk _btn())."""
+    b = button(text, "line", tip, small=small)
+    b.setStyleSheet(f"QPushButton {{ border-color: {color}; }}"
+                    f"QPushButton:hover {{ background: {color}; }}"
+                    + (f"QPushButton {{ min-height: {height}px; max-height: {height}px; }}" if height else "")
+                    + (f"QPushButton {{ font-size: 11px; }}" if small else ""))
+    return b
 
 
 def button(text, role, tip=None, small=False, **props):

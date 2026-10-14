@@ -3,10 +3,9 @@ ui_qt/app.py
 ────────────
 MainWindow: the Qt main window, started with `tts_app.py --qt`.
 
-Header, two-column layout, status bar, and the panels ported so far (phases
-2 and 3 of docs/pyside6-migration-plan.md): Text Input and Playback & Export
-on the left; TTS Engine, Customization and Voice Effects on the right. The
-Clone Voice group and its dialogs come in phase 4.
+Header, two-column layout and status bar, with Text Input and Playback &
+Export on the left and TTS Engine, Customization (with Clone Voice) and Voice
+Effects on the right (phases 2 to 4 of docs/pyside6-migration-plan.md).
 
 Threads: the generation worker never touches a widget. It reports through
 ui_qt.bridge.ui(), which runs the call on the GUI thread.
@@ -147,8 +146,10 @@ class MainWindow(QMainWindow):
         self._right_l.setContentsMargins(0, 0, 6, 0)
         self._right_l.setSpacing(12)
         self._engine_panel = EnginePanel(self._available_engines, self._system_voices)
-        self._cust_panel = CustomizationPanel()
+        self._cust_panel = CustomizationPanel(app=self)
         self._effects_panel = EffectsPanel(on_edit_clones=self._open_voice_manager)
+        if self._cust_panel.clone_group is not None:
+            self._cust_panel.clone_group.attach(self._effects_panel)
         for panel in (self._engine_panel, self._cust_panel, self._effects_panel):
             self._right_l.addWidget(panel.frame)
         self._right_l.addStretch(1)
@@ -180,13 +181,34 @@ class MainWindow(QMainWindow):
         outer.addWidget(bar)
         self.set_status("Ready — Enter text and click Generate")
 
+    def refresh_cloned_voices(self, select=None):
+        """Re-read the voice library into the registry, the tiles and the Clone Voice group.
+
+        select: slug of a voice to switch on afterwards (e.g. just created).
+        """
+        from effects.cloned_voices import refresh_cloned_voices
+        from effects.registry import EFFECTS_REGISTRY
+        try:
+            refresh_cloned_voices(EFFECTS_REGISTRY)
+        except Exception as e:
+            print(f"Cloned voice refresh failed: {e}")
+        self._effects_panel.sync()
+        group = self._cust_panel.clone_group
+        if group is not None:
+            group.refresh()
+        if select:
+            self._effects_panel.set_active(f"clone:{select}", True)
+
     def _open_voice_manager(self):
-        """✏️ in Cloned Voices. The Cloned Voices dialog is ported in phase 4."""
-        QMessageBox.information(
-            self, "Cloned Voices",
-            "Renaming, editing and deleting cloned voices moves to this window in the next "
-            "step of the migration.\n\nUntil then, use the classic window (run without --qt). "
-            "Cloned voices already work here: switch one on in Voice Effects.")
+        """✏️ in Cloned Voices: rename, re-base, tune or delete voices."""
+        from ui_qt.panels.clone_voice_dialog import ManageVoicesDialog
+        win = getattr(self, "_voice_manager", None)
+        if win is not None and win.isVisible():
+            win.raise_()
+            win.activateWindow()
+            return
+        self._voice_manager = ManageVoicesDialog(self)
+        self._voice_manager.show()
 
     # ── what panels may use (same names as AditsVoiceStudioApp) ────
     @property
@@ -501,6 +523,8 @@ class MainWindow(QMainWindow):
                 return
         self._stop_event.set()
         self._play_timer.stop()
+        if self._cust_panel.clone_group is not None:
+            self._cust_panel.clone_group.cleanup()      # stops clone tasks and previews
         self._text_panel.cleanup()          # closes the dictation mic, stops a transcription
         try:
             pygame.mixer.quit()

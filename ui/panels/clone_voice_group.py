@@ -36,8 +36,9 @@ import customtkinter as ctk
 
 from core.audio_io import AUDIO_EXTENSIONS
 from core.constants import COLORS, FONTS
-from core.voice_cloning import estimate, library, pitch, previews, runtime
-from core.voice_cloning.errors import VCCancelled, VCError, VCWorkerError
+from core import voice_selection
+from core.voice_cloning import estimate, library, pitch, previews, runtime, tasks
+from core.voice_cloning.errors import VCCancelled, VCError
 from ui.panels.effects_panel import HEART_FONT, HEART_OFF, HEART_ON
 from ui.theme import styled_slider
 
@@ -45,21 +46,15 @@ CLONE_GROUP = "clone"
 KEY_PREFIX = "clone:"
 PREVIEW_TEXT = previews.TEXT
 AUDIO_TYPES = [("Audio files", " ".join("*" + e for e in AUDIO_EXTENSIONS)), ("All files", "*.*")]
-MODES = ["Quick", "Train (RVC)", "Import model"]
+MODES = tasks.MODES
 MODE_HINTS = {
     "Quick": "No training. Uses up to 25 s of your clips and is ready in seconds.",
     "Train (RVC)": "Trains a voice model on your clips. Best with 3+ minutes of clean speech. "
                    "Cloned voices can't be used while training runs.",
     "Import model": "Use an existing RVC voice model (.pth), with its .index if you have it.",
 }
-SR_CHOICES = {"32 kHz": 32000, "40 kHz": 40000, "48 kHz": 48000}
-# "Use part of each recording" presets: the first N seconds, or Custom
-# ranges. Seed-VC (Quick) only reads 25 s of reference, so Quick stops at
-# 25 s; training uses everything it is given.
-TRIM_PRESETS = {
-    "Quick": {"10 s": 10, "20 s": 20, "25 s": 25, "Custom": None},
-    "Train (RVC)": {"1 min": 60, "3 min": 180, "5 min": 300, "Custom": None},
-}
+SR_CHOICES = tasks.SR_CHOICES
+TRIM_PRESETS = tasks.TRIM_PRESETS          # "Use part of each recording" presets
 WIDE_PX = 600                       # two tile columns from this box width up
 CLIP_PLAY_CHANNEL = 6               # pygame channel of the Recordings clip player
 TITLE_FONT = ("Segoe UI", 11, "bold")
@@ -850,46 +845,19 @@ class CloneVoiceGroup:
 
     # ── clip selection logic ───────────────────────────────────────
     def _selections(self):
-        """[{"path", "start", "end"}] that cloning will use, given the trim options.
-
-        "First N s" counts recording time from the start of the first clip and
-        continues into the next clips until N seconds are covered.
-        """
-        clips = self._clips
-        mode = self._mode_var.get()
-        if not self.trim_on.get() or mode not in TRIM_PRESETS:
-            return [{"path": c["path"]} for c in clips]
-        limit = TRIM_PRESETS[mode].get(self.trim_var.get())
-        if limit is None:                                       # Custom
-            return [{"path": c["path"], "start": c.get("start"), "end": c.get("end")} for c in clips]
-        out, left = [], float(limit)
-        for c in clips:
-            if left <= 0.05:
-                break
-            take = min(left, c["seconds"])
-            out.append({"path": c["path"]} if take >= c["seconds"] - 0.01
-                       else {"path": c["path"], "start": 0.0, "end": round(take, 3)})
-            left -= take
-        return out
+        """[{"path", "start", "end"}] that cloning will use, given the trim options."""
+        return tasks.selections(self._clips, self._mode_var.get(), self.trim_on.get(), self.trim_var.get())
 
     def _sel_seconds(self, sel, full):
-        start = sel.get("start") or 0.0
-        end = sel.get("end") if sel.get("end") is not None else full
-        return max(0.0, end - start)
+        return tasks.sel_seconds(sel, full)
 
     def _clip_seconds(self):
         """Seconds of audio cloning will use (after the trim options)."""
-        full = {c["path"]: c["seconds"] for c in self._clips}
-        return sum(self._sel_seconds(s, full[s["path"]]) for s in self._selections())
+        return tasks.clip_seconds(self._clips, self._selections())
 
     def _prep_options(self):
-        mode = self._mode_var.get()
-        trim = None
-        if self.trim_on.get() and mode in TRIM_PRESETS:
-            limit = TRIM_PRESETS[mode].get(self.trim_var.get())
-            trim = "custom" if limit is None else f"first{limit}"
-        return {"trim": trim, "separate": bool(self.clean_on.get()), "denoise": bool(self.denoise_var.get()),
-                "skip_silences": bool(self.skipsil_on.get())}
+        return tasks.prep_options(self._mode_var.get(), self.trim_on.get(), self.trim_var.get(),
+                                  self.clean_on.get(), self.denoise_var.get(), self.skipsil_on.get())
 
     def _refresh_prep(self, mode):
         """Show / hide the clean-up options for the current mode and selection."""
@@ -938,10 +906,7 @@ class CloneVoiceGroup:
         self._cleanup_btn.configure(state="normal" if self._clips and not self._busy else "disabled")
         self._analyze_btn.configure(state="normal" if self._clips and not self._busy else "disabled")
 
-    @staticmethod
-    def _clock(t):
-        m, s = divmod(int(round(t)), 60)
-        return f"{m}:{s:02d}"
+    _clock = staticmethod(tasks.clock)
 
     def _edit_clip(self, i):
         from ui.panels.timeline_dialog import TimelineDialog
@@ -1177,24 +1142,13 @@ class CloneVoiceGroup:
             text = self.app.text_panel.get_text()
         except Exception:
             text = ""
-        speech = estimate.speech_seconds(text)
         warm = False
         try:
             from core.voice_cloning import get_client
             warm = get_client().is_warm(p.mode)
         except Exception:
             pass
-        steps = int(round(self.steps_var.get()))
-        if speech < 0.5:
-            per10 = estimate.conversion_seconds(p.mode, 10, steps)
-            msg = f"⏱  Adds {estimate.fmt(per10)} per 10 s of speech"
-        else:
-            t = estimate.conversion_seconds(p.mode, speech, steps)
-            msg = f"⏱  Adds {estimate.fmt(t)} to this text"
-        if not warm:
-            first = estimate.conversion_seconds(p.mode, 0, steps, first_use=True)
-            msg += f", +{estimate.fmt(first).replace('about ', '')} the first time"
-        self._active_est.configure(text=msg)
+        self._active_est.configure(text=tasks.active_estimate(p, text, int(round(self.steps_var.get())), warm))
 
     def _tick(self):
         """Keep the time estimate in step with the text box."""
@@ -1212,35 +1166,22 @@ class CloneVoiceGroup:
         except Exception:
             return None
 
-    @staticmethod
-    def _selection_for(p):
-        """The profile's base selection; older voices only stored engine + voice."""
-        if p is None:
-            return None
-        if p.base_selection:
-            return p.base_selection
-        if p.base_engine:
-            from ui.panels.engine_panel import EnginePanel
-            return {"engine": p.base_engine, "kind": EnginePanel.engine_kind(p.base_engine),
-                    "voice": p.base_voice or None}
-        return None
+    _selection_for = staticmethod(tasks.selection_for)
 
     def _show_base(self, p):
-        from ui.panels.engine_panel import EnginePanel
         sel = self._selection_for(p)
         if p is None:
             self._base_row.grid_remove()
             return
         self._base_row.grid()
         if sel:
-            self._base_value.configure(text=EnginePanel.describe_selection(sel),
+            self._base_value.configure(text=voice_selection.describe_selection(sel),
                                        text_color=COLORS["text_primary"])
         else:
             self._base_value.configure(text="not set", text_color=COLORS["text_muted"])
 
     def _apply_base(self, p):
         """Select the voice's base engine voice in the TTS Engine card."""
-        from ui.panels.engine_panel import EnginePanel
         sel = self._selection_for(p)
         if not sel:
             self.app.set_status(f"ℹ  '{p.name}' has no base voice yet. Pick an engine voice and press "
@@ -1250,12 +1191,11 @@ class CloneVoiceGroup:
         if err:
             self.app.set_status(f"⚠  Base voice for '{p.name}' not selected: {err}", COLORS["warning"])
         else:
-            self.app.set_status(f"🔁  TTS Engine set to {EnginePanel.describe_selection(sel)}, "
+            self.app.set_status(f"🔁  TTS Engine set to {voice_selection.describe_selection(sel)}, "
                                  f"the base voice of '{p.name}'", COLORS["accent_primary"])
         self._update_create()
 
     def _on_use_current_base(self):
-        from ui.panels.engine_panel import EnginePanel
         p = self._active_profile
         sel = self._engine_selection()
         if p is None or not sel:
@@ -1266,29 +1206,23 @@ class CloneVoiceGroup:
         self._show_base(p)
         hint = " Press 🎯 Match to re-measure the pitch." if p.mode == "rvc" and p.clips else ""
         self.app.set_status(f"✅  Base voice of '{p.name}' set to "
-                             f"{EnginePanel.describe_selection(sel)}.{hint}", COLORS["success"])
+                             f"{voice_selection.describe_selection(sel)}.{hint}", COLORS["success"])
 
     def _base_voice(self):
         try:
             s = self.app.engine_panel.get_settings()
         except Exception:
             return "", "", None
-        name = s["engine_name"]
-        voice = (s["edge_voice_key"] if "Edge" in name else
-                 s["kokoro_voice_key"] if "Kokoro" in name else
-                 s["piper_voice_key"] if "Piper" in name else
-                 (s["melo_voice_cfg"] or {}).get("speaker", "") if "Melo" in name else
-                 s["pyttsx3_voice_id"] if "pyttsx3" in name else "")
-        return name, str(voice), s
+        name, voice = tasks.base_voice(s)
+        return name, voice, s
 
     def _update_create(self):
         if not self._cleanup_preview and self._preview_playing is not None:
             self._stop_preview()            # the preview was discarded and its buttons hide
         self._refresh_player()
         mode = self._mode_var.get()
-        from ui.panels.engine_panel import EnginePanel
         sel = self._engine_selection()
-        self._base_label.configure(text=EnginePanel.describe_selection(sel) if sel else "not set")
+        self._base_label.configure(text=voice_selection.describe_selection(sel) if sel else "not set")
         self._refresh_prep(mode)
         self._layout()
 
@@ -1355,10 +1289,7 @@ class CloneVoiceGroup:
         name_ok = bool(self._name_entry.get().strip())
         self._create_btn.configure(state="normal" if ok and name_ok and not self._busy else "disabled")
 
-    @staticmethod
-    def _fmt_len(secs):
-        m, s = divmod(int(round(secs)), 60)
-        return f"{m} min {s:02d} s" if m else f"{s} s"
+    _fmt_len = staticmethod(tasks.fmt_len)
 
     def _on_add_clips(self):
         paths = filedialog.askopenfilenames(title="Choose recordings of the target voice",
@@ -1576,15 +1507,7 @@ class CloneVoiceGroup:
 
     def _usable_match(self, eng_settings, clips, prep):
         """The voice match Result when it was made from these clips with this base voice, else None."""
-        from ui.panels.engine_panel import EnginePanel
-        m = getattr(self, "_match_result", None)
-        if not m or not eng_settings or not os.path.isfile(m["wav"]):
-            return None
-        same_clean = bool(m["clean"]) == bool(prep.get("separate")) and (
-            not m["clean"] or bool(m["denoise"]) == bool(prep.get("denoise")))
-        if m["selections"] != clips or not same_clean:
-            return None
-        return m if m["synth_key"] == EnginePanel.synthesis_key(eng_settings) else None
+        return tasks.usable_match(getattr(self, "_match_result", None), eng_settings, clips, prep)
 
     def _on_clear_clips(self):
         self._clips = []
@@ -1678,18 +1601,12 @@ class CloneVoiceGroup:
 
         cancel: the Event that aborts it (default: this group's Cancel button).
         """
-        import numpy as np
-        from core.audio_io import load_segment
-        synth = self.app.synth
-        cancel = cancel or self._cancel
-        if eng_settings["engine_name"] not in synth.engine_map:
-            raise VCError("The selected TTS engine is not available.")
-        res = synth.synthesize(text, tmp, eng_settings, check_cancel=cancel.is_set)
-        if cancel.is_set():
-            raise VCCancelled()
-        seg = load_segment(res["playback_file"]).set_channels(1)
-        peak = float(2 ** (8 * seg.sample_width - 1))
-        return np.array(seg.get_array_of_samples(), dtype=np.float32) / peak, seg.frame_rate
+        return tasks.synthesize(self.app.synth, text, eng_settings, tmp, cancel or self._cancel)
+
+    def _ctx(self):
+        """What a tasks.* job needs: the synthesizer, Cancel, progress and temp folders."""
+        return tasks.TaskContext(self.app.synth, self._cancel,
+                                 lambda frac, msg: self._ui(self._set_progress, frac, msg), self._tmp_dirs)
 
     def _new_tmp(self):
         d = tempfile.mkdtemp(prefix="adits_vs_clone_")
@@ -1777,142 +1694,23 @@ class CloneVoiceGroup:
 
     def _prepare(self, p, prep, lo=0.0, hi=0.3):
         """Trim and/or clean the clips before cloning (no-op when both are off)."""
-        if not prep or not (prep.get("trim") or prep.get("separate") or prep.get("skip_silences")):
-            return p
-        separate_fn = None
-        if prep.get("separate"):
-            from core.voice_cloning import get_client
-            client = get_client()
-
-            def separate_fn(src, dst, denoise):
-                client.separate(src, dst, denoise=denoise, cancel_event=self._cancel,
-                                status_cb=lambda m: self._ui(self._set_progress, None, m))
-        t0 = time.monotonic()
-        est = estimate.separation_seconds(p.total_seconds) if separate_fn else 2
-
-        def progress(frac, msg):
-            left = max(0.0, est - (time.monotonic() - t0))
-            self._ui(self._set_progress, lo + (hi - lo) * frac,
-                     f"{msg} · {estimate.fmt(left)} left" if separate_fn and frac < 1 else msg)
-        return library.prepare_clips(p, separate_fn=separate_fn, denoise=prep.get("denoise", False),
-                                     progress_cb=progress, check_cancel=self._check_cancel,
-                                     skip_silences=prep.get("skip_silences", False))
+        return tasks.prepare(self._ctx(), p, prep, lo, hi)
 
     def _save_first_preview(self, p, eng_settings, match=None):
-        """Save the new voice's ▶ Preview.
-
-        match (from _usable_match): the voice match ▶ Result made from the same
-        clips and base voice. Its first 10 s are transcribed once, and those
-        words become the voice's preview_text, so later remakes say the same
-        thing. A Quick voice keeps that audio as its preview: the analyzer
-        cloned it the same way (Seed-VC, the clip as reference), so nothing is
-        spoken again. A trained (RVC) voice speaks the words with its model.
-        Without a match the preview says previews.TEXT.
-
-        The voice is ready by now, so neither a failure nor Cancel undoes it;
-        ▶ Preview makes the preview later instead.
-        """
-        if not eng_settings:
-            return
-        try:
-            from ui.panels.engine_panel import EnginePanel
-            cut = None
-            if match:
-                self._ui(self._set_progress, 0.95, "Taking the preview from the voice match result…")
-                cut = previews.cut_preview(match["wav"], os.path.join(self._new_tmp(), "preview.wav"))
-                words = previews.transcribe(cut)
-                if words:
-                    p = library.update_params(p.slug, preview_text=words)
-                else:
-                    cut = None                  # nothing heard: fall back to the fixed sentence
-            self._check_cancel()
-            sound = previews.sound_of(p)
-            if cut is None or p.mode != "seedvc":
-                self._ui(self._set_progress, 0.95, "Saving a preview of the voice…")
-                cut = self.make_preview(p, eng_settings, sound)
-            previews.store(p.slug, cut, previews.fingerprint(p, EnginePanel.synthesis_key(eng_settings), sound))
-        except VCCancelled:
-            print(f"Preview of '{p.name}' skipped: cancelled")
-        except Exception as e:   # noqa: BLE001
-            print(f"Preview of '{p.name}' not saved: {e}")
+        """Save the new voice's ▶ Preview (see tasks.save_first_preview)."""
+        tasks.save_first_preview(self._ctx(), p, eng_settings, match)
 
     def _do_quick(self, name, clips, eng, voice, base_sel=None, prep=None, eng_settings=None, match=None):
-        p = library.create_voice(name, "seedvc", clips, eng, voice, base_selection=base_sel, prep=prep)
-        try:
-            p = self._prepare(p, prep, 0.0, 0.8)
-            self._ui(self._set_progress, 0.3, "Trimming silence and building the reference…")
-            library.build_seedvc_reference(p)
-            self._check_cancel()
-            p = library.update_params(p.slug, status="ready")
-            self._save_first_preview(p, eng_settings, match)
-        except BaseException:
-            library.delete_voice(p.slug)
-            raise
+        p = tasks.create_quick(self._ctx(), name, clips, eng, voice, base_sel, prep, eng_settings, match)
         return self._finish_new_voice(p, f"Voice '{name}' is ready. It is switched on in Voice Effects.")
 
     def _do_import(self, name, pth, index):
-        from core.voice_cloning import get_client
-        info = get_client().inspect_rvc(pth)
-        self._check_cancel()
-        p = library.import_rvc_model(name, pth, index, info)
+        p, info = tasks.import_model(self._ctx(), name, pth, index)
         return self._finish_new_voice(p, f"Voice '{name}' imported ({info['sample_rate'] // 1000} kHz model).")
 
     def _do_train(self, name, clips, eng, voice, eng_settings, opts, base_sel=None, prep=None, match=None):
-        from core.voice_cloning import get_client
-        p = library.create_voice(name, "rvc", clips, eng, voice, base_selection=base_sel, prep=prep)
-        t0 = time.monotonic()
-        est = estimate.training_seconds(p.total_seconds, opts["epochs"], opts["batch_size"], opts["sample_rate"])
-        try:
-            p = self._prepare(p, prep, 0.0, 0.02)
-            if opts["match"] and eng_settings:
-                self._ui(self._set_progress, 0.01, "Measuring pitch of the base and target voices…")
-                tmp = self._new_tmp()
-                y, sr = self._synthesize(pitch.BASE_SENTENCE, eng_settings, tmp)
-                base_wav = os.path.join(p.dir, "samples", "base.wav")
-                os.makedirs(os.path.dirname(base_wav), exist_ok=True)
-                import soundfile as sf
-                sf.write(base_wav, y, sr)
-                r = pitch.estimate_offset(base_wav, library.clip_audio_paths(p))
-                self._check_cancel()
-                p = library.update_params(p.slug, pitch=r["offset"], base_f0_hz=r["base_f0"],
-                                          target_f0_hz=r["target_f0"])
-            self._ui(self._set_progress, 0.02, "Converting clips for training…")
-            ds = library.build_dataset(p)
-            self._check_cancel()
-            p = library.update_params(p.slug, status="training", batch_size=opts["batch_size"])
-
-            def on_progress(ev):
-                frac = ev.get("fraction") or 0
-                stage = ev.get("stage")
-                if stage == "train" and ev.get("epoch") is not None:
-                    left = ev.get("eta_seconds")
-                    if left is None:
-                        left = (opts["epochs"] - ev["epoch"]) * est["per_epoch"] + 75
-                    text = (f"Training · epoch {ev['epoch']}/{ev['total_epoch']} · "
-                            f"{estimate.fmt_clock(left)} left")
-                else:
-                    elapsed = time.monotonic() - t0
-                    text = f"{ev.get('message') or stage} · {estimate.fmt(max(0, est['total'] - elapsed))} left"
-                self._ui(self._set_progress, frac, text)
-
-            res = get_client().train_rvc(p, ds, epochs=opts["epochs"], batch_size=opts["batch_size"],
-                                         sample_rate=opts["sample_rate"],
-                                         save_every_epoch=max(10, opts["epochs"] // 10),
-                                         progress_cb=on_progress, cancel_event=self._cancel)
-            p = library.update_params(p.slug, status="ready", pth=f"model/{p.slug}.pth",
-                                      index=f"model/{p.slug}.index" if res.get("index") else None,
-                                      sample_rate=res["sample_rate"], epochs=res["epochs"])
-            shutil.rmtree(p.dir / "dataset", ignore_errors=True)
-            self._save_first_preview(p, eng_settings, match)
-        except VCWorkerError as e:
-            library.delete_voice(p.slug)
-            if e.kind == "oom" and opts["batch_size"] > 1:
-                e.hint = (e.hint or "") + f"\nTry again with batch size {opts['batch_size'] // 2}."
-            raise
-        except BaseException:
-            library.delete_voice(p.slug)
-            raise
-        took = estimate.fmt(time.monotonic() - t0).replace("about ", "")
+        p, seconds = tasks.train(self._ctx(), name, clips, eng, voice, eng_settings, opts, base_sel, prep, match)
+        took = estimate.fmt(seconds).replace("about ", "")
         return self._finish_new_voice(p, f"Voice '{name}' trained in {took} and switched on.")
 
     def _on_match_pitch(self):
@@ -1922,16 +1720,7 @@ class CloneVoiceGroup:
         _, _, eng_settings = self._base_voice()
 
         def work():
-            tmp = self._new_tmp()
-            y, sr = self._synthesize(pitch.BASE_SENTENCE, eng_settings, tmp)
-            base_wav = os.path.join(tmp, "base.wav")
-            import soundfile as sf
-            sf.write(base_wav, y, sr)
-            self._ui(self._set_progress, 0.4, "Measuring pitch…")
-            r = pitch.estimate_offset(base_wav, library.clip_audio_paths(p))
-            self._check_cancel()
-            library.update_params(p.slug, pitch=r["offset"], base_f0_hz=r["base_f0"],
-                                  target_f0_hz=r["target_f0"])
+            r = tasks.match_pitch(self._ctx(), p, eng_settings)
             self._ui(self.pitch_var.set, r["offset"])
             return (f"✅  Pitch set to {r['offset']:+d} st "
                     f"(base {r['base_f0'] or 0:.0f} Hz → target {r['target_f0'] or 0:.0f} Hz)")
@@ -1942,33 +1731,17 @@ class CloneVoiceGroup:
 
         Runs on a worker thread. sound: previews.sound_of() values to convert with.
         """
-        import soundfile as sf
-        from effects.cloned_voices import convert_samples
-        cancel = cancel or self._cancel
-        say = say or (lambda m: None)
-        tmp = self._new_tmp()
-        say("Synthesizing the preview sentence…")
-        y, sr = self._synthesize(previews.text_of(p), eng_settings, tmp, cancel=cancel)
-        say("Converting to the cloned voice…")
-        params = {"pitch": p.pitch, "index_rate": p.index_rate, "protect": p.protect,
-                  "diffusion_steps": p.diffusion_steps}
-        params.update(sound)
-        out = convert_samples(p.slug, y, sr, cancel_event=cancel, status_cb=say, **params)
-        path = os.path.join(tmp, "preview.wav")
-        sf.write(path, out, sr)
-        return path
+        return tasks.make_preview(self._ctx(), p, eng_settings, sound, cancel=cancel, say=say)
 
     def saved_fingerprint(self, p):
         """Fingerprint of *p*'s preview with its saved base and sound, or None without a usable base."""
-        from ui.panels.engine_panel import EnginePanel
         eng, err = self.app.engine_panel.settings_for_selection(self._selection_for(p))
         if err:
             return None
-        return previews.fingerprint(p, EnginePanel.synthesis_key(eng), previews.sound_of(p))
+        return previews.fingerprint(p, voice_selection.synthesis_key(eng), previews.sound_of(p))
 
     def _on_preview(self):
         """▶ Preview plays the voice's preview (saved, or made now); ■ Stop stops it."""
-        from ui.panels.engine_panel import EnginePanel
         if self._active_sound is not None:
             self._stop_active_preview()
             return
@@ -1979,7 +1752,7 @@ class CloneVoiceGroup:
         p = self._active_profile
         _, _, eng_settings = self._base_voice()
         sound = previews.sound_of(p)
-        fp = previews.fingerprint(p, EnginePanel.synthesis_key(eng_settings), sound)
+        fp = previews.fingerprint(p, voice_selection.synthesis_key(eng_settings), sound)
         saved = previews.cached(p.slug, fp)
         if saved:                               # made before with exactly these settings
             if self._play_active_preview(saved):
@@ -2002,7 +1775,6 @@ class CloneVoiceGroup:
         Skipped while another Clone Voice task runs; ▶ Preview then makes it
         the next time it is pressed.
         """
-        from ui.panels.engine_panel import EnginePanel
         try:
             p = library.load_voice(slug)
         except (OSError, ValueError):
@@ -2013,7 +1785,7 @@ class CloneVoiceGroup:
         if err:
             return
         sound = previews.sound_of(p)
-        fp = previews.fingerprint(p, EnginePanel.synthesis_key(eng), sound)
+        fp = previews.fingerprint(p, voice_selection.synthesis_key(eng), sound)
         if previews.cached(slug, fp):
             return
 
@@ -2036,29 +1808,18 @@ class CloneVoiceGroup:
             return
         first = dict(sels[0])
         full = next(c["seconds"] for c in self._clips if c["path"] == first["path"])
-        start = first.get("start") or 0.0
-        end = first.get("end") if first.get("end") is not None else full
-        end = min(end, start + 30.0)                 # preview at most 30 s
         denoise = bool(self.denoise_var.get())
 
         def work():
-            from core.audio_io import load_segment
-            from core.voice_cloning import get_client
-            tmp = self._new_tmp()
-            orig = os.path.join(tmp, "original.wav")
-            load_segment(first["path"])[int(start * 1000):int(end * 1000)].export(orig, format="wav")
-            self._check_cancel()
-            res = get_client().separate(orig, os.path.join(tmp, "cleaned.wav"), denoise=denoise,
-                                        cancel_event=self._cancel,
-                                        status_cb=lambda m: self._ui(self._set_progress, 0.3, m))
-            self._cleanup_preview = (orig, res["out"])
+            orig, cleaned, seconds, elapsed = tasks.cleanup_preview(self._ctx(), first, full, denoise)
+            self._cleanup_preview = (orig, cleaned)
 
             def ui():
                 self._update_create()          # shows ▶ Original / ▶ Cleaned
                 self._play_preview(1)
             self._ui(ui)
-            return (f"▶  Playing the cleaned audio ({end - start:.0f} s, music removed in "
-                    f"{res['elapsed']:.0f} s). Compare with ▶ Original.")
+            return (f"▶  Playing the cleaned audio ({seconds:.0f} s, music removed in "
+                    f"{elapsed:.0f} s). Compare with ▶ Original.")
         self._run("Cleanup preview", "Removing background music from a sample…", work)
 
     _PREVIEW_IDLE = ("▶ Original", "▶ Cleaned")

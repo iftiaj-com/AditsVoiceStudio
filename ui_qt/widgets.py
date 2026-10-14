@@ -5,8 +5,8 @@ Small widgets shared by the Qt panels.
 """
 from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFontMetrics, QPainter
-from PySide6.QtWidgets import (QAbstractButton, QLabel, QMessageBox, QSizePolicy, QSlider, QStyle,
-                               QStyleOptionSlider)
+from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QHBoxLayout, QLabel, QMessageBox,
+                               QPushButton, QSizePolicy, QSlider, QStyle, QStyleOptionSlider, QWidget)
 
 from core.constants import COLORS
 
@@ -101,6 +101,15 @@ class ValueSlider(QSlider):
             self.setFixedWidth(width)
         self.valueChanged.connect(lambda _v: self.valueChangedF.emit(self.value_f()))
 
+    def set_range(self, lo, hi, step):
+        """New range and step (the handle keeps its value where it fits)."""
+        v = self.value_f()
+        self.blockSignals(True)
+        self._lo, self._step = float(lo), float(step)
+        self.setRange(0, int(round((hi - lo) / step)))
+        self.blockSignals(False)
+        self.set_value(max(lo, min(hi, v)))
+
     def value_f(self) -> float:
         v = self._lo + self.value() * self._step
         return float(round(v)) if self._step >= 1 else round(v, 6)
@@ -193,3 +202,75 @@ def ask_choice(parent, title, message, choices, default=None):
             box.setEscapeButton(b)
     box.exec()
     return buttons.get(box.clickedButton())
+
+
+class Segmented(QWidget):
+    """A row of joined buttons, one of which is selected: the Qt counterpart of
+    CTkSegmentedButton (Active / Create voice, Mode, trim presets, gender).
+
+    changed(str) fires when the user (or set_value) picks another value.
+    """
+    changed = Signal(str)
+
+    def __init__(self, values, value=None, height=26, parent=None):
+        super().__init__(parent)
+        self._row = QHBoxLayout(self)
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(0)
+        self._height = height
+        self._buttons = {}
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._group.buttonClicked.connect(lambda b: self._picked(b.text()))
+        self._value = None
+        self.set_values(values, value)
+
+    def _picked(self, value):
+        if value != self._value:
+            self._value = value
+            self.changed.emit(value)
+
+    def set_values(self, values, value=None):
+        """Replace the buttons; keeps the selection when it is still offered."""
+        for b in list(self._buttons.values()):
+            self._group.removeButton(b)
+            b.setParent(None)
+            b.deleteLater()
+        self._buttons = {}
+        values = list(values)
+        for i, v in enumerate(values):
+            b = QPushButton(v)
+            b.setCheckable(True)
+            b.setAutoDefault(False)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFixedHeight(self._height)
+            b.setProperty("role", "seg")
+            b.setProperty("pos", "only" if len(values) == 1 else
+                          "first" if i == 0 else "last" if i == len(values) - 1 else "mid")
+            self._group.addButton(b)
+            self._row.addWidget(b, 1)
+            self._buttons[v] = b
+        keep = value if value in self._buttons else (self._value if self._value in self._buttons else
+                                                     (values[0] if values else None))
+        self._value = None
+        if keep is not None:
+            self._buttons[keep].setChecked(True)
+            self._value = keep
+
+    def values(self):
+        return list(self._buttons)
+
+    def value(self):
+        return self._value
+
+    def set_value(self, value, emit=True):
+        if value in self._buttons and value != self._value:
+            self._buttons[value].setChecked(True)
+            self._value = value
+            if emit:
+                self.changed.emit(value)
+
+    def set_tips(self, tips):
+        for v, text in tips.items():
+            if v in self._buttons:
+                self._buttons[v].setToolTip(text)

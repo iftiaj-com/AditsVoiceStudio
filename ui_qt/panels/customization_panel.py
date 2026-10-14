@@ -10,8 +10,8 @@ ui/panels/customization_panel.py, in the same order:
     Ambiance: [None ▾]   Vol: ━━●━━ 50%
       [📥 Import] [▶ Play] [⏸ Pause] [⏮ Restart] [✖ Remove]  file name
 
-The Clone Voice group is added in phase 4 of the migration; until then
-get_settings() returns clone_voice = {} (the voice's saved values are used).
+The Clone Voice group (ui_qt/panels/clone_voice_group.py) sits last, built
+when the app is passed, as in the CTk panel.
 
 One change from the CTk panel: choosing "Custom File..." again after a
 built-in sound reloads the imported file. The CTk panel kept the built-in
@@ -48,7 +48,7 @@ def _short(path):
 
 
 class CustomizationPanel:
-    def __init__(self):
+    def __init__(self, app=None):
         self.frame, lay = theme.card("⚙️  Customization Options")
         self._temp_dirs = []
         self._temp_files = []
@@ -56,7 +56,7 @@ class CustomizationPanel:
         self._amb_sound = None
         self._amb_sound_source = None       # what _amb_sound was made from (a file path or a built-in name)
         self._ambiance_channel = None
-        self.clone_group = None             # phase 4
+        self.clone_group = None
 
         # ── Speech ─────────────────────────────────────────────────
         box, bl = theme.inset()
@@ -148,6 +148,12 @@ class CustomizationPanel:
         bl.addWidget(self._amb_row)
         lay.addWidget(box)
         self._env.currentTextChanged.connect(self._on_env_change)
+
+        # ── Clone Voice: needs the app (engine panel, effects panel, status bar) ──
+        if app is not None:
+            from ui_qt.panels.clone_voice_group import CloneVoiceGroup
+            self.clone_group = CloneVoiceGroup(app)
+            lay.addWidget(self.clone_group.box)
 
         self._on_env_change("None")
         self._on_eq_change(False)

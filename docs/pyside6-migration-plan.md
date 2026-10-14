@@ -3,8 +3,8 @@
 Move the Adits Voice Studio UI from CustomTkinter to PySide6 (Qt 6), one phase
 at a time, with the app usable after every phase.
 
-Status, 2026-10-14: Phases 0, 1 and 2 committed on branch `qt-migration`.
-Phase 3 built and tested (not committed). Next: Phase 4.
+Status, 2026-10-14: Phases 0 to 4 committed on branch `qt-migration`.
+Next: Phase 5.
 
 ---
 
@@ -286,6 +286,53 @@ The largest phase: about 3,900 lines across five files.
 **Done when:** install, Quick and RVC creation, import model, record, trim,
 clean-up preview, Analyze, Apply, ✏️ edit, preview and delete all pass the
 parity checklist.
+
+**Result (2026-10-14):**
+
+* `core/voice_cloning/tasks.py`: the Clone Voice jobs and rules moved out of
+  the CTk group (create Quick / trained / imported voices, clip
+  preparation, first preview, previews, pitch measuring and matching, the
+  cleanup preview, clip selections, length rules, estimates). Both groups
+  call it; the CTk group kept every method name (checked: no member lost,
+  one added, `_ctx()`).
+* Built: `ui_qt/panels/clone_voice_group.py` and `clone_voice_dialog.py`
+  (lead), and `record_dialog.py`, `timeline_dialog.py`, `analyzer_dialog.py`
+  (ported by three agents in parallel, each to a written interface, then
+  reviewed). `Segmented` (CTkSegmentedButton) and `ValueSlider.set_range()`
+  in `ui_qt/widgets.py`. The main window has `refresh_cloned_voices()` and
+  opens the Cloned Voices dialog from ✏️.
+* Forced differences: the Active voice picker is a QComboBox with a ♥
+  delegate (Qt's list scrolls); tooltips use the system delay; the dialogs
+  ignore Esc as the CTk ones do; the recorder reads only the last 12 s of
+  frames for its live waveform; the timeline uses a min/max peak pyramid
+  (column edges can move up to 64 samples).
+* Checked with the installed runtime (test voices made and deleted; the
+  user's 134 voices only read):
+  - `tasks.py` without a UI: Quick voice made and its preview saved; a
+    fresh preview; pitch measured on an RVC voice (offset -6, nothing
+    saved); music-removal preview.
+  - Qt window: switching on a Quick and an RVC voice applied their base
+    voice and showed their saved values; generation with the RVC voice
+    went through load and conversion and Whisper read it back word for
+    word; Create tab rules for all three modes; Custom trim row; timeline
+    and recorder open from the group; one or two tile columns at 471 and
+    671 px; Quick test voice created in 90 s, switched on, preview saved;
+    a slider move saved to its profile; ▶ Preview / ■ Stop; the Cloned
+    Voices dialog listed 135 rows, previewed, renamed, saved and deleted
+    the test voice.
+  - CTk window after the move: its Create flow made a Quick test voice in
+    78 s, switched it on and saved its preview.
+  - Agents' own checks: recorder 56 of 56 (fake microphone, for privacy),
+    timeline 74 of 74 (70 s WAV), voice match one full real run (ranked
+    Kokoro bf_alice first, Apply passed the selection and Result back),
+    plus Cancel and closing mid-run.
+* Not checked: Install and Update (the runtime is already installed), a
+  real RVC training, Import model with a real .pth, recording from a real
+  microphone, the voice bank rebuild and the music-removal path inside
+  Analyze.
+* Found, not changed (also in the CTk app): take names have 1-second
+  resolution, so two takes in the same second share a file name; deleting
+  the active voice logs "Could not save voice settings" once.
 
 ### Phase 5. Packaging and docs (rough guess: 2 to 3 days)
 
