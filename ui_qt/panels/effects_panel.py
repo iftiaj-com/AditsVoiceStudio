@@ -24,13 +24,13 @@ import os
 import re
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLineEdit, QSizePolicy,
+from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QSizePolicy,
                                QVBoxLayout, QWidget)
 
 from core import paths
 from core.constants import COLORS
 from effects.registry import EFFECTS_REGISTRY
-from ui_qt import theme
+from ui_qt import icons, theme
 from ui_qt.widgets import ElidedLabel, ToggleSwitch
 
 CLONE_GROUP = "clone"
@@ -96,7 +96,7 @@ class _Tile(QFrame):
         g.setHorizontalSpacing(4)
         g.setVerticalSpacing(0)
         g.setColumnStretch(0, 1)
-        self.switch = ToggleSwitch(label, on)
+        self.switch = ToggleSwitch(label, on, icon=icons.effect_icon(key))
         self.switch.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.switch.clicked.connect(lambda checked: panel._user_toggle(key, checked))
         g.addWidget(self.switch, 0, 0)
@@ -137,6 +137,7 @@ class _ResultRow(QFrame):
     def show_key(self, key, name, desc, on, favourite):
         self.key = key
         self.name.setText(name)
+        self.name.set_icon_name(icons.effect_icon(key))
         self.desc.setText(desc)
         self.switch.setChecked(on)
         _paint_heart(self.heart, favourite)
@@ -223,7 +224,6 @@ class EffectsPanel:
         clone_head.addWidget(theme.section_label("🧬  Cloned Voices"))
         clone_head.addStretch(1)
         self._edit_btn = theme.button("✏️", theme.ROLE_ICON)
-        theme.icon_font(self._edit_btn, "Segoe UI Emoji", 13)
         self._edit_btn.clicked.connect(self._on_edit_clicked)
         clone_head.addWidget(self._edit_btn)
         body_l.addLayout(clone_head)
@@ -299,8 +299,8 @@ class EffectsPanel:
         bl = QHBoxLayout(box)
         bl.setContentsMargins(8, 1, 4, 1)
         bl.setSpacing(2)
-        icon = theme.label("🔍", muted=True)
-        theme.icon_font(icon, "Segoe UI Emoji", 11)
+        icon = QLabel()
+        icon.setPixmap(icons.pixmap("search", COLORS["text_muted"], 14))
         bl.addWidget(icon)
         self._search_entry = QLineEdit()
         self._search_entry.setPlaceholderText("Search effects and voices")

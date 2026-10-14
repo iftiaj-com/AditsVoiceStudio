@@ -126,12 +126,10 @@ class TextPanel:
         self._dict_label = theme.label("", small=True)
         head.addWidget(self._dict_label)
         self._mic_btn = theme.button("🎤", theme.ROLE_ICON, MIC_TIP)
-        theme.icon_font(self._mic_btn, "Segoe UI Emoji", 13)
         self._mic_btn.clicked.connect(self._toggle_dictation)
         head.addWidget(self._mic_btn)
         self._add_btn = theme.button("+", theme.ROLE_ICON,
                                      "Import captions or a text file, or transcribe an audio or video file.")
-        theme.icon_font(self._add_btn, "Segoe UI", 18, bold=True)
         self._menu = QMenu(self._add_btn)
         self._act_import = self._menu.addAction("Import captions or text…", self._import_captions)
         self._act_transcribe = self._menu.addAction("Transcribe audio or video…", self._transcribe_media)
@@ -184,7 +182,6 @@ class TextPanel:
     def _foot_btn(self, foot, text, command, tip, icon=False):
         btn = theme.button(text, theme.ROLE_GHOST, tip, small=True)
         if icon:
-            theme.icon_font(btn, "Segoe UI Symbol", 17, bold=True)
             btn.setFixedWidth(30)
         btn.clicked.connect(command)
         foot.addWidget(btn)

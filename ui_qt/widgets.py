@@ -3,12 +3,124 @@ ui_qt/widgets.py
 ────────────────
 Small widgets shared by the Qt panels.
 """
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPalette
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QHBoxLayout, QLabel, QMessageBox,
                                QPushButton, QSizePolicy, QSlider, QStyle, QStyleOptionSlider, QWidget)
 
 from core.constants import COLORS
+from ui_qt import icons
+
+ICON_GAP = 6
+
+
+class IconLabel(QLabel):
+    """A QLabel that shows a leading emoji as a line icon (ui_qt.icons).
+
+    setText("⚠  Could not play") draws the warning icon, then "Could not play".
+    The icon takes the label's current text color, so a status that turns red
+    gets a red icon. Every other QLabel feature (word wrap, alignment, style
+    sheet colors) works as usual.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._icon = None
+        self._icon_color = None         # None: the text color
+        self.setText(text)
+
+    def set_icon_color(self, color):
+        self._icon_color = QColor(color) if color else None
+        self.update()
+
+    def setText(self, text):
+        self._icon, plain = icons.split(text)
+        self._apply_margin()
+        super().setText(plain)
+
+    def icon_name(self):
+        return self._icon
+
+    def set_icon_name(self, name):
+        """Show *name* as the icon (after setText, which picks the icon from the text)."""
+        self._icon = name
+        self._apply_margin()
+        self.update()
+
+    def _icon_px(self):
+        return max(12, QFontMetrics(self.font()).height() - 3)
+
+    def _apply_margin(self):
+        m = self.contentsMargins()
+        left = (self._icon_px() + ICON_GAP) if self._icon else 0
+        if m.left() != left:
+            self.setContentsMargins(left, m.top(), m.right(), m.bottom())
+
+    def changeEvent(self, e):
+        if e.type() in (QEvent.FontChange, QEvent.StyleChange):
+            self._apply_margin()
+        super().changeEvent(e)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self._icon:
+            return
+        size = self._icon_px()
+        fm = QFontMetrics(self.font())
+        cr = self.contentsRect()
+        if self.wordWrap() or not (self.alignment() & Qt.AlignVCenter):
+            y = cr.top() + (fm.height() - size) / 2       # beside the first line
+        else:
+            y = (self.height() - size) / 2
+        color = self._icon_color or self.palette().color(QPalette.WindowText)
+        p = QPainter(self)
+        p.drawPixmap(int(round(cr.left() - size - ICON_GAP)), int(round(y)),
+                     icons.pixmap(self._icon, color, size))
+
+
+class IconButton(QPushButton):
+    """A QPushButton that shows a leading emoji as a line icon (ui_qt.icons).
+
+    Works for later setText() calls too ("▶  Play" -> "■  Stop"). The icon is
+    drawn in the button's text color, and muted when the button is disabled.
+    """
+
+    def __init__(self, text="", parent=None):
+        super().__init__(parent)
+        self._icon_name = None
+        self.setText(text)
+
+    def setText(self, text):
+        self._icon_name, plain = icons.split(text)
+        plain = plain.replace("&", "&&")
+        # A space between the icon and the words; the style's own gap is too tight.
+        super().setText(" " + plain if self._icon_name and plain else plain)
+        self._refresh_icon()
+
+    def text(self):
+        t = super().text()
+        return (t[1:] if self._icon_name and t.startswith(" ") else t).replace("&&", "&")
+
+    def set_icon_name(self, name):
+        self._icon_name = name
+        self._refresh_icon()
+
+    def icon_name(self):
+        return self._icon_name
+
+    def _refresh_icon(self):
+        if not self._icon_name:
+            self.setIcon(icons.QIcon())
+            return
+        size = max(14, QFontMetrics(self.font()).height() - 2)
+        color = self.palette().color(QPalette.ButtonText)
+        self.setIcon(icons.icon(self._icon_name, color, size))
+        self.setIconSize(QSize(size, size))
+
+    def changeEvent(self, e):
+        if e.type() in (QEvent.StyleChange, QEvent.PaletteChange, QEvent.FontChange):
+            self._refresh_icon()
+        super().changeEvent(e)
 
 
 class ToggleSwitch(QAbstractButton):
@@ -20,8 +132,10 @@ class ToggleSwitch(QAbstractButton):
     """
     TRACK_W, TRACK_H, GAP = 36, 18, 10
 
-    def __init__(self, text="", checked=False, on_color=None, parent=None):
+    def __init__(self, text="", checked=False, on_color=None, parent=None, icon=None):
         super().__init__(parent)
+        lead, text = icons.split(text)
+        self._icon = icon or lead       # line icon between the switch and the text
         self.setText(text)
         self.setCheckable(True)
         self.setChecked(checked)
@@ -37,10 +151,19 @@ class ToggleSwitch(QAbstractButton):
         self._text_color = QColor(color)
         self.update()
 
+    def set_icon_name(self, name):
+        self._icon = name
+        self.updateGeometry()
+        self.update()
+
+    def _icon_px(self):
+        return max(14, QFontMetrics(self.font()).height() - 2)
+
     def sizeHint(self):
         fm = QFontMetrics(self.font())
         text_w = fm.horizontalAdvance(self.text()) + self.GAP if self.text() else 0
-        return QSize(self.TRACK_W + text_w + 2, max(self.TRACK_H + 6, fm.height() + 4))
+        icon_w = self._icon_px() + ICON_GAP if self._icon else 0
+        return QSize(self.TRACK_W + icon_w + text_w + 2, max(self.TRACK_H + 6, fm.height() + 4))
 
     def minimumSizeHint(self):
         return QSize(self.TRACK_W + 2, self.TRACK_H + 6)
@@ -65,10 +188,16 @@ class ToggleSwitch(QAbstractButton):
         knob = self._knob_hover if (self.underMouse() and enabled) else self._knob
         p.setBrush(knob if enabled else knob.darker(160))
         p.drawEllipse(QRectF(x0 + k, y + k, h - 2 * k, h - 2 * k))
+        color = self._text_color if enabled else QColor(COLORS["text_muted"])
+        left = w + self.GAP
+        if self._icon:
+            size = self._icon_px()
+            p.drawPixmap(int(left), int(round((self.height() - size) / 2)),
+                         icons.pixmap(self._icon, color, size))
+            left += size + ICON_GAP
         if self.text():
-            p.setPen(self._text_color if enabled else QColor(COLORS["text_muted"]))
+            p.setPen(color)
             p.setFont(self.font())
-            left = w + self.GAP
             fm = QFontMetrics(self.font())
             text = fm.elidedText(self.text(), Qt.ElideRight, max(0, self.width() - left))
             p.drawText(QRectF(left, 0, self.width() - left, self.height()),

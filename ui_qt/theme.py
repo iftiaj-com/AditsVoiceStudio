@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout
 
 from core import paths
 from core.constants import COLORS, FONTS
+from ui_qt.widgets import IconButton, IconLabel
 
 C = COLORS
 
@@ -270,7 +271,7 @@ QFrame#resultRow[active="true"] {{ border-color: {C['accent_primary']}; }}
 
 QPushButton[role="heart"] {{
     background: transparent; border: none; border-radius: 6px;
-    font-family: 'Segoe UI Symbol'; font-size: 21px;
+    font-size: 15px;
     min-height: 26px; max-height: 26px; min-width: 30px; max-width: 30px; padding: 0;
     color: {C['text_muted']};
 }}
@@ -351,7 +352,7 @@ def card(title=None):
     lay.setContentsMargins(16, 12, 16, 12)
     lay.setSpacing(8)
     if title:
-        lab = QLabel(title)
+        lab = IconLabel(title)
         lab.setObjectName("cardTitle")
         lay.addWidget(lab)
     return frame, lay
@@ -369,10 +370,11 @@ def line_button(text, color, tip=None, height=None, small=False):
 
 
 def button(text, role, tip=None, small=False, **props):
-    """A QPushButton with a theme role (and optional tooltip / extra style properties).
+    """An IconButton with a theme role (and optional tooltip / extra style properties).
 
-    "&" is shown as is (Qt would read it as a keyboard shortcut marker)."""
-    b = QPushButton(text.replace("&", "&&"))
+    A leading emoji in *text* becomes a line icon (ui_qt.icons); "&" is shown
+    as is (Qt would read it as a keyboard shortcut marker)."""
+    b = IconButton(text)
     b.setProperty("role", role)
     if small:
         b.setProperty("small", True)
@@ -391,7 +393,7 @@ def icon_font(widget, family, px, bold=False):
 
 
 def label(text="", *, muted=False, secondary=False, small=False):
-    lab = QLabel(text)
+    lab = IconLabel(text)
     if muted:
         lab.setProperty("muted", True)
     if secondary:
@@ -412,7 +414,7 @@ def inset():
 
 
 def section_label(text):
-    lab = QLabel(text)
+    lab = IconLabel(text)
     lab.setObjectName("section")
     return lab
 

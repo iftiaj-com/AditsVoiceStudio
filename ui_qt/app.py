@@ -30,13 +30,14 @@ from core.constants import COLORS
 from core.playback import Player
 from core.synth import Synthesizer
 from core.version import APP_TITLE
-from ui_qt import bridge, theme
+from ui_qt import bridge, icons, theme
 from ui_qt.bridge import ui
 from ui_qt.panels.customization_panel import CustomizationPanel
 from ui_qt.panels.effects_panel import EffectsPanel
 from ui_qt.panels.engine_panel import EnginePanel
 from ui_qt.panels.playback_panel import PlaybackPanel
 from ui_qt.panels.text_panel import TextPanel
+from ui_qt.widgets import IconLabel
 
 SITE_URL = "https://www.iftiaj.com"
 
@@ -166,10 +167,7 @@ class MainWindow(QMainWindow):
         bar.setObjectName("statusBar")
         sb = QHBoxLayout(bar)
         sb.setContentsMargins(14, 8, 14, 8)
-        self._status_dot = QLabel("●")
-        self._status_dot.setFixedWidth(14)
-        sb.addWidget(self._status_dot)
-        self._status_label = QLabel("Ready — Enter text and click Generate")
+        self._status_label = IconLabel("Ready — Enter text and click Generate")
         self._status_label.setObjectName("statusText")
         self._status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         sb.addWidget(self._status_label, 1)
@@ -232,9 +230,12 @@ class MainWindow(QMainWindow):
         return self._is_generating
 
     def set_status(self, text, color=None):
-        self._status_label.setText(text)
-        self._status_label.setToolTip(text)
-        theme.set_color(self._status_dot, color or COLORS["text_muted"])
+        """Status bar: the message's leading emoji becomes an icon in *color*
+        (a dot when it has none); the words stay in the secondary text color."""
+        icon, plain = icons.split(text)
+        self._status_label.setText(text if icon else "●  " + plain)
+        self._status_label.set_icon_color(color or COLORS["text_muted"])
+        self._status_label.setToolTip(plain)
 
     # ── generation ─────────────────────────────────────────────────
     def _on_generate(self):

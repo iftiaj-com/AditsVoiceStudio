@@ -31,8 +31,7 @@ from the CTk dialog, none of which change what the user sees:
 * The dialog is not deleted when it closes, so the caller's reference stays
   valid for isVisible(). Its audio buffers are released at close instead.
 * Esc does nothing, as in the CTk dialog; the close box asks as before.
-* The ▶ / ⏸ button uses Segoe UI Symbol, so ⏸ is a plain glyph like in Tk
-  and not Qt's color emoji fallback.
+* Symbols on buttons and labels are line icons (ui_qt.icons), not emoji.
 """
 
 import os
@@ -114,7 +113,7 @@ class _Wave(QWidget):
         self._live = False
         self._window = 1            # samples in LIVE_WINDOW at the current rate
         self._pos = None            # playhead as a fraction of the take, or None
-        self._msg = "Press ● Record to start"
+        self._msg = "Press Record to start"
         self._cache_key = None
         self._cols = None
         self._msg_font = QFont("Segoe UI")
@@ -308,9 +307,6 @@ class RecordDialog(QDialog):
         self._play_btn = theme.button("▶", theme.ROLE_OUTLINE)
         self._play_btn.setObjectName("recPlay")
         self._play_btn.setFixedWidth(40)
-        # Segoe UI Symbol draws ▶ and ⏸ as plain glyphs; the default font
-        # falls back to the color emoji for ⏸.
-        theme.icon_font(self._play_btn, "Segoe UI Symbol", 13)
         self._play_btn.clicked.connect(self._toggle_play)
         pr.addWidget(self._play_btn)
         self._seek = SeekSlider()
@@ -658,7 +654,7 @@ QPushButton#recPlay:hover {{ background: {c['success']}; }}
         recording = self._stream is not None
         y = self._live_samples() if recording else self._audio
         if y is None or y.size == 0:
-            self.canvas.show_message("Press ● Record to start" if not recording else "Listening…")
+            self.canvas.show_message("Press Record to start" if not recording else "Listening…")
             return
         if recording:                         # scrolling window of the last LIVE_WINDOW seconds
             self.canvas.show_live(y, int(LIVE_WINDOW * self._rate))
@@ -681,7 +677,7 @@ QPushButton#recPlay:hover {{ background: {c['success']}; }}
         self._done_row.hide()
         self._info.setText("")
         self._time_lbl.setText("0:00")
-        self._set_tip("Take discarded. Press ● Record to try again.", COLORS["text_muted"])
+        self._set_tip("Take discarded. Press Record to try again.", COLORS["text_muted"])
         self._draw()
 
     def _add(self):

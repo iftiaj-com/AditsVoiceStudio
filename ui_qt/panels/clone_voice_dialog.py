@@ -25,7 +25,7 @@ import subprocess
 import threading
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+from PySide6.QtWidgets import (QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLineEdit, QMessageBox, QScrollArea, QVBoxLayout, QWidget)
 
 from core import voice_selection
@@ -34,7 +34,7 @@ from core.voice_cloning import library, previews, runtime, tasks
 from core.voice_cloning.errors import VCCancelled, VCError
 from ui_qt import theme
 from ui_qt.bridge import ui
-from ui_qt.widgets import ValueSlider
+from ui_qt.widgets import IconLabel, ValueSlider
 
 # (profile field, label, low, high, step, format, tip) of each sound slider,
 # the same ranges as the Clone Voice box.
@@ -71,7 +71,7 @@ def _round_sound(field, value):
 
 
 def _small(text="", color=None):
-    lab = QLabel(text)
+    lab = IconLabel(text)
     lab.setProperty("small", True)
     theme.set_color(lab, color or COLORS["text_secondary"])
     return lab
@@ -353,7 +353,7 @@ class ManageVoicesDialog(QDialog):
         title.setObjectName("cardTitle")
         lay.addWidget(title)
         help_ = theme.label("Rename a voice, or open its settings to change the base voice, speed "
-                            "and sound, then press Save. ▶ Preview tries the settings before you "
+                            "and sound, then press Save. Preview tries the settings before you "
                             "save them. Deleting removes the voice's recordings and model from disk.",
                             muted=True, small=True)
         help_.setWordWrap(True)
@@ -477,7 +477,7 @@ class ManageVoicesDialog(QDialog):
         delete.setAutoDefault(False)
         delete.clicked.connect(lambda: self._delete(v))
         g.addWidget(delete, 0, 2)
-        toggle = theme.line_button("🔊  Voice settings ▾", COLORS["accent_primary"], height=26, small=True,
+        toggle = theme.line_button("▾  Voice settings", COLORS["accent_primary"], height=26, small=True,
                                    tip="Change the engine voice and speed this clone is made from, and how "
                                        "the clone sounds. Preview before you save.")
         toggle.setFixedWidth(166)
@@ -516,7 +516,7 @@ class ManageVoicesDialog(QDialog):
             elif editor["ed"] is not None:
                 editor["ed"].frame.hide()
                 self._open.discard(v.slug)
-            toggle.setText("🔊  Voice settings ▴" if show else "🔊  Voice settings ▾")
+            toggle.setText("▴  Voice settings" if show else "▾  Voice settings")
 
         toggle.clicked.connect(lambda: open_editor(v.slug not in self._open))
         save.clicked.connect(lambda: self._save(v, entry.text(), editor["ed"]))
@@ -582,7 +582,7 @@ class ManageVoicesDialog(QDialog):
                 err = self.app.engine_panel.apply_voice_selection(sel)
                 msg += f" (TTS Engine not changed: {err})" if err else ", selected in TTS Engine"
         if sel is not None and editor.f0 is None and v.slug in self._matchable:
-            msg += ". Press 🎯 next to Pitch to re-measure it for the new base."
+            msg += ". Press Match pitch next to Pitch to re-measure it for the new base."
         remake = (sel is not None or sound is not None) and self._update_saved_preview(p)
         self.app.set_status(msg, COLORS["success"])
         self._build_rows()

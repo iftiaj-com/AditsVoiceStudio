@@ -56,6 +56,7 @@ from core.constants import COLORS
 from core.voice_cloning import voicematch
 from core.voice_cloning.errors import VCCancelled, VCError
 from ui_qt import theme
+from ui_qt.widgets import IconLabel
 from ui_qt.bridge import ui
 
 # The constants below match ui/panels/analyzer_dialog.py, which cannot be
@@ -117,7 +118,7 @@ class AnalyzerDialog(QDialog):
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(0)
 
-        title = QLabel("🔍  Voice match")
+        title = IconLabel("🔍  Voice match")
         title.setObjectName("cardTitle")
         root.addWidget(title)
         root.addSpacing(2)
@@ -340,7 +341,7 @@ QPushButton#amClose:hover {{ background: {c['border']}; }}
                 return clip, [], None
 
             if not self._clip_text:
-                return clip, shortlist, ("No words were heard in your clip, so there is no ▶ Result. "
+                return clip, shortlist, ("No words were heard in your clip, so there is no Result. "
                                          "Ranked by voice similarity.")
             return clip, *self._make_results(shortlist, clip_wav, clip)
 

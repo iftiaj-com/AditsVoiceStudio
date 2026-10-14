@@ -35,8 +35,7 @@ import shutil
 import threading
 import time
 
-from PySide6.QtCore import QEvent, QObject, QRect, Qt, QTimer
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QProgressBar, QCheckBox, QSizePolicy,
                                QStyledItemDelegate, QVBoxLayout, QWidget)
@@ -46,9 +45,9 @@ from core.audio_io import AUDIO_EXTENSIONS
 from core.constants import COLORS
 from core.voice_cloning import library, previews, runtime, tasks
 from core.voice_cloning.errors import VCCancelled, VCError
-from ui_qt import theme
+from ui_qt import icons, theme
 from ui_qt.bridge import ui
-from ui_qt.widgets import SeekSlider, Segmented, ToggleSwitch, ValueSlider
+from ui_qt.widgets import IconLabel, SeekSlider, Segmented, ToggleSwitch, ValueSlider
 
 CLONE_GROUP = "clone"
 KEY_PREFIX = "clone:"
@@ -69,7 +68,7 @@ AUDIO_FILTER = ("Audio files (" + " ".join("*" + e for e in AUDIO_EXTENSIONS) + 
 
 
 def _small(text="", color=None, wrap=False):
-    lab = QLabel(text)
+    lab = IconLabel(text)
     lab.setProperty("small", True)
     theme.set_color(lab, color or COLORS["text_secondary"])
     if wrap:
@@ -163,15 +162,10 @@ class _HeartDelegate(QStyledItemDelegate):
     def paint(self, painter, option, index):
         super().paint(painter, option, index)
         if self._is_favourite(index.data()):
-            painter.save()
-            painter.setPen(QColor(COLORS["accent_primary"]))
-            f = painter.font()
-            f.setFamily("Segoe UI Symbol")
-            painter.setFont(f)
-            r = QRect(option.rect)
-            r.setRight(r.right() - 8)
-            painter.drawText(r, Qt.AlignVCenter | Qt.AlignRight, HEART_ON)
-            painter.restore()
+            size = 14
+            r = option.rect
+            painter.drawPixmap(r.right() - 8 - size, r.top() + (r.height() - size) // 2,
+                               icons.pixmap("heart-filled", COLORS["accent_primary"], size))
 
 
 class CloneVoiceGroup:
@@ -550,7 +544,7 @@ class CloneVoiceGroup:
         self._clean_switch.setToolTip("Separates the voice from background music with Demucs. The first use "
                                       "downloads the model (about 80 MB).")
         cl.addWidget(self._clean_switch)
-        self._denoise_cb = QCheckBox("Also reduce hiss & hum")
+        self._denoise_cb = QCheckBox("Also reduce hiss && hum")
         self._denoise_cb.toggled.connect(lambda _on: self._update_create())
         self._denoise_wrap = self._indented(self._denoise_cb)
         cl.addWidget(self._denoise_wrap)
@@ -1060,7 +1054,7 @@ class CloneVoiceGroup:
                                   base_voice=str(sel.get("voice") or ""))
         self._active_profile = p
         self._show_base(p)
-        hint = " Press 🎯 Match to re-measure the pitch." if p.mode == "rvc" and p.clips else ""
+        hint = " Press Match pitch to re-measure it." if p.mode == "rvc" and p.clips else ""
         self.app.set_status(f"✅  Base voice of '{p.name}' set to "
                             f"{voice_selection.describe_selection(sel)}.{hint}", COLORS["success"])
 

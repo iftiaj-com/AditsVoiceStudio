@@ -31,8 +31,9 @@ def _fix_width(btn, *texts):
     # The style sheet sets the font when the button is first shown, so measure
     # with the theme font rather than btn.fontMetrics().
     fm = QFontMetrics(theme.font("button"))
-    widest = max(fm.horizontalAdvance(t) for t in (btn.text(),) + texts)
-    btn.setMinimumWidth(widest + 28)                # padding and border
+    widest = max(fm.horizontalAdvance(" " + t) for t in (btn.text(),) + texts)
+    icon_w = fm.height() + 2 if btn.icon_name() else 0     # IconButton's icon, about one line tall
+    btn.setMinimumWidth(widest + icon_w + 28)       # padding and border
     btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
 
 
