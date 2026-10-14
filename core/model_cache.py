@@ -26,8 +26,9 @@ def _release_accelerator_memory():
     """Return CUDA memory to the OS after evicting models (no-op without torch)."""
     gc.collect()
     try:
-        import torch
-        if torch.cuda.is_available():
+        import sys
+        torch = sys.modules.get("torch")    # nothing to free if no model loaded torch
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
         pass

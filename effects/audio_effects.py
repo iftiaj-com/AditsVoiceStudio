@@ -18,17 +18,28 @@ from pydub import AudioSegment
 
 from core.audio_io import load_segment
 
-try:
-    import librosa
-    _LIBROSA_AVAILABLE = True
-except ImportError:
-    _LIBROSA_AVAILABLE = False
+import importlib
+import importlib.util
 
-try:
-    import scipy.signal as signal
-    _SCIPY_AVAILABLE = True
-except ImportError:
-    _SCIPY_AVAILABLE = False
+
+class _OnFirstUse:
+    """A module imported on first attribute access (librosa alone takes about 3 s)."""
+
+    def __init__(self, name):
+        self._name = name
+        self._mod = None
+
+    def __getattr__(self, attr):
+        if self._mod is None:
+            self._mod = importlib.import_module(self._name)
+        return getattr(self._mod, attr)
+
+
+_LIBROSA_AVAILABLE = importlib.util.find_spec("librosa") is not None
+librosa = _OnFirstUse("librosa")
+
+_SCIPY_AVAILABLE = importlib.util.find_spec("scipy") is not None
+signal = _OnFirstUse("scipy.signal")
 
 
 

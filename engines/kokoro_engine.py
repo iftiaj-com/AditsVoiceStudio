@@ -6,14 +6,11 @@ from engines.base import BaseTTSEngine
 from core import paths
 from core.constants import KOKORO_VOICES
 
-try:
-    from kokoro import KPipeline
-    import soundfile as sf
-    _AVAILABLE = True
-except ImportError:
-    _AVAILABLE = False
+import soundfile as sf
 
-# Always mark as available — we have the ONNX fallback bundled
+# Always available: the ONNX backend is bundled. The PyTorch package (kokoro:
+# torch, transformers, librosa, about 14 s to import) is imported only when
+# the ONNX backend fails, in _get_pipeline().
 _AVAILABLE = True
 
 _ONNX_MODEL_URL  = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"

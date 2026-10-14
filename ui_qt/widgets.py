@@ -4,7 +4,7 @@ ui_qt/widgets.py
 Small widgets shared by the Qt panels.
 """
 from PySide6.QtCore import QEvent, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPalette
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPalette
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QHBoxLayout, QLabel, QMessageBox,
                                QPushButton, QSizePolicy, QSlider, QStyle, QStyleOptionSlider, QWidget)
 
@@ -68,10 +68,12 @@ class IconLabel(QLabel):
         size = self._icon_px()
         fm = QFontMetrics(self.font())
         cr = self.contentsRect()
-        if self.wordWrap() or not (self.alignment() & Qt.AlignVCenter):
-            y = cr.top() + (fm.height() - size) / 2       # beside the first line
-        else:
-            y = (self.height() - size) / 2
+        # Centre the icon on the first line of text, wherever the label's
+        # alignment and wrapping put that line (a wrapped one-line label in a
+        # tall row is centred too, so cr.top() would be too high).
+        flags = int(self.alignment()) | (int(Qt.TextWordWrap) if self.wordWrap() else 0)
+        first = fm.boundingRect(cr, flags, self.text()).top() if self.text() else cr.top()
+        y = first + (fm.height() - size) / 2
         color = self._icon_color or self.palette().color(QPalette.WindowText)
         p = QPainter(self)
         p.drawPixmap(int(round(cr.left() - size - ICON_GAP)), int(round(y)),
@@ -113,7 +115,9 @@ class IconButton(QPushButton):
             self.setIcon(icons.QIcon())
             return
         size = max(14, QFontMetrics(self.font()).height() - 2)
-        color = self.palette().color(QPalette.ButtonText)
+        # The active color: a button built disabled must not keep a muted icon
+        # once enabled (icons.icon() makes the disabled look itself).
+        color = self.palette().color(QPalette.Active, QPalette.ButtonText)
         self.setIcon(icons.icon(self._icon_name, color, size))
         self.setIconSize(QSize(size, size))
 
@@ -121,6 +125,47 @@ class IconButton(QPushButton):
         if e.type() in (QEvent.StyleChange, QEvent.PaletteChange, QEvent.FontChange):
             self._refresh_icon()
         super().changeEvent(e)
+
+
+class ProgressButton(IconButton):
+    """An IconButton that can show progress as a fill growing from the left.
+
+    set_progress(0.4) fills 40% of the button with a translucent *fill_color*
+    over the normal look, so the text and icon stay readable. None hides it.
+    """
+    RADIUS = 10                         # QPushButton border-radius in theme.stylesheet()
+
+    def __init__(self, text="", parent=None, fill_color="#FFFFFF", fill_alpha=46):
+        self._progress = None
+        self._fill = QColor(fill_color)
+        self._fill.setAlpha(fill_alpha)
+        super().__init__(text, parent)
+
+    def set_fill_color(self, color, alpha=46):
+        self._fill = QColor(color)
+        self._fill.setAlpha(alpha)
+        self.update()
+
+    def progress(self):
+        return self._progress
+
+    def set_progress(self, frac):
+        frac = None if frac is None else max(0.0, min(1.0, float(frac)))
+        if frac != self._progress:
+            self._progress = frac
+            self.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self._progress:
+            return
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        clip = QPainterPath()
+        clip.addRoundedRect(r, self.RADIUS - 1, self.RADIUS - 1)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setClipPath(clip)
+        p.fillRect(QRectF(r.left(), r.top(), r.width() * self._progress, r.height()), self._fill)
 
 
 class ToggleSwitch(QAbstractButton):

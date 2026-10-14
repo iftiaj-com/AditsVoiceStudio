@@ -15,10 +15,10 @@ def get_whisper_model():
     skip the multi-second reload without permanently hogging VRAM.
     """
     def _load():
-        import torch
         from faster_whisper import WhisperModel
+        from core.gpu import cuda_available
         from core.paths import bundle_dir
-        use_cuda = torch.cuda.is_available()
+        use_cuda = cuda_available()
         # Installed builds ship Systran/faster-whisper-base so subtitles work
         # offline; from source it comes from the Hugging Face cache.
         bundled = bundle_dir() / "models" / "whisper-base"

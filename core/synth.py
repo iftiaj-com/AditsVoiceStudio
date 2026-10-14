@@ -22,8 +22,8 @@ class Synthesizer:
 
     @staticmethod
     def device_for(eng_settings) -> str:
-        import torch
-        return "cuda" if eng_settings.get("use_gpu") and torch.cuda.is_available() else "cpu"
+        from core.gpu import cuda_available     # no torch import for engines that never use it
+        return "cuda" if eng_settings.get("use_gpu") and cuda_available() else "cpu"
 
     @staticmethod
     def engine_kwargs(eng_settings, device_str, status_cb, check_cancel) -> dict:

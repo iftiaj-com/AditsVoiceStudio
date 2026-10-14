@@ -73,9 +73,10 @@ def run(req, synth, tmp_dir, cancel_event, progress=None, status=None, warn=None
             raise Cancelled()
 
     import gc
-    import torch
+    import sys
     gc.collect()
-    if torch.cuda.is_available():
+    torch = sys.modules.get("torch")        # nothing to free if no engine loaded torch
+    if torch is not None and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     check_cancel()

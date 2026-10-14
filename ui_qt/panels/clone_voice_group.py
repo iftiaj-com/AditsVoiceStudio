@@ -273,7 +273,9 @@ class CloneVoiceGroup:
         tg.addWidget(self._stage, 1, 0)
         tg.setColumnStretch(0, 1)
         self._task.hide()
+        self._box_l = lay
         lay.addWidget(self._task)
+        self._dock_task()
 
         self._resize_filter = _ResizeWatch(self._on_resize)
         box.installEventFilter(self._resize_filter)
@@ -508,10 +510,16 @@ class CloneVoiceGroup:
         self._match_switch.setToolTip("Measures the pitch of the base voice and your clips, then sets the "
                                       "clone's Pitch so they line up.")
 
-        # ── Footer: estimate and the main action ──
+        # ── Footer: the task row (while a job runs, see _dock_task), then
+        #    the estimate and the main action ──
         self._footer = QWidget()
-        fh = QHBoxLayout(self._footer)
+        fv = QVBoxLayout(self._footer)
+        fv.setContentsMargins(0, 0, 0, 0)
+        fv.setSpacing(8)
+        self._footer_l = fv
+        fh = QHBoxLayout()
         fh.setContentsMargins(2, 0, 0, 0)
+        fv.addLayout(fh)
         self._create_est = _small("", COLORS["text_secondary"], wrap=True)
         fh.addWidget(self._create_est, 1)
         self._create_btn = _btn("🧬  Create Voice", self._on_create, COLORS["accent_primary"], filled=True, height=32)
@@ -520,7 +528,13 @@ class CloneVoiceGroup:
         return page
 
     def _build_prep(self):
-        """Optional clip preparation, applied in order: trim, remove music, skip silences."""
+        """Optional clip preparation, applied in order: trim, then remove music.
+
+        Three columns when wide: Use part | Remove music & noise | Preview
+        cleanup with ▶ Original / ▶ Cleaned. The third shows only while music
+        removal is on, and the first two then share the width. (Skip silences
+        was dropped from this window: the Seed-VC reference and Applio's
+        preprocessing already cut long pauses.)"""
         self._clean_tile = _Tile("Clean-up")
         # 1. use part of each recording
         self._trim_col = QWidget()
@@ -552,7 +566,11 @@ class CloneVoiceGroup:
                                  height=26, small=True,
                                  tip="Clean up to 30 s of the first clip so you can compare before and after.")
         self._cleanup_wrap = self._indented(self._cleanup_btn)
-        cl.addWidget(self._cleanup_wrap)
+        # 3. compare before / after (beside the switch when wide, under it when narrow)
+        self._ab_col = QWidget()
+        al = QVBoxLayout(self._ab_col)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.addWidget(self._cleanup_wrap)
         ab = QWidget()
         abh = QHBoxLayout(ab)
         abh.setContentsMargins(0, 0, 0, 0)
@@ -564,16 +582,8 @@ class CloneVoiceGroup:
         abh.addWidget(self._play_clean_btn)
         abh.addStretch(1)
         self._ab_wrap = self._indented(ab)
-        cl.addWidget(self._ab_wrap)
-        # 3. skip silences (applied last, to the trimmed / cleaned audio)
-        self._skip_col = QWidget()
-        sk = QVBoxLayout(self._skip_col)
-        sk.setContentsMargins(0, 0, 0, 0)
-        self._skipsil_switch = self._switch("Skip silences", self._update_create)
-        self._skipsil_switch.setToolTip("Applied last: removes pauses longer than 0.4 s from the trimmed "
-                                        "and cleaned audio.")
-        sk.addWidget(self._skipsil_switch)
-        for col in (self._trim_col, self._clean_col, self._skip_col):
+        al.addWidget(self._ab_wrap)
+        for col in (self._trim_col, self._clean_col, self._ab_col):
             col.layout().addStretch(1)
 
     @staticmethod
@@ -627,10 +637,9 @@ class CloneVoiceGroup:
         for wrap in (self._trim_seg_wrap, self._denoise_wrap, self._cleanup_wrap, self._ab_wrap):
             m = wrap.layout().contentsMargins()
             wrap.layout().setContentsMargins(indent, m.top(), 0, 0)
-        for c in range(3):
-            body.setColumnStretch(c, 1 if three_cols or c == 0 else 0)
+        self._three_cols = three_cols
         if three_cols:
-            for i, col in enumerate((self._trim_col, self._clean_col, self._skip_col)):
+            for i, col in enumerate((self._trim_col, self._clean_col, self._ab_col)):
                 body.addWidget(col, 1, i)
                 col.show()
             if custom:
@@ -644,11 +653,21 @@ class CloneVoiceGroup:
                 body.addWidget(self._custom_list, r, 0, 1, 3)
                 self._custom_list.show()
             body.addWidget(self._clean_col, r + 1, 0, 1, 3)
-            body.addWidget(self._skip_col, r + 2, 0, 1, 3)
-            for col in (self._trim_col, self._clean_col, self._skip_col):
+            body.addWidget(self._ab_col, r + 2, 0, 1, 3)
+            for col in (self._trim_col, self._clean_col, self._ab_col):
                 col.show()
         if not custom:
             self._custom_list.hide()
+        self._prep_columns()
+
+    def _prep_columns(self):
+        """The compare column only while music removal is on; no empty third column."""
+        clean = self._clean_switch.isChecked()
+        self._ab_col.setVisible(clean)
+        three = getattr(self, "_three_cols", False)
+        body = self._clean_tile.body
+        for c, st in enumerate((1, 1, 1 if clean else 0) if three else (1, 0, 0)):
+            body.setColumnStretch(c, st)
 
     def _layout_rec_buttons(self, one_row):
         g = self._rec_btns
@@ -724,7 +743,7 @@ class CloneVoiceGroup:
     def _prep_options(self):
         return tasks.prep_options(self._mode(), self._trim_switch.isChecked(), self._trim_seg.value(),
                                   self._clean_switch.isChecked(), self._denoise_cb.isChecked(),
-                                  self._skipsil_switch.isChecked())
+                                  False)
 
     def _refresh_prep(self, mode):
         """Show / hide the clean-up options for the current mode and selection."""
@@ -743,6 +762,7 @@ class CloneVoiceGroup:
         self._denoise_wrap.setVisible(clean)
         self._cleanup_wrap.setVisible(clean)
         self._ab_wrap.setVisible(clean and bool(self._cleanup_preview))
+        self._prep_columns()
 
         custom = self._trim_switch.isChecked() and TRIM_PRESETS[mode].get(self._trim_seg.value()) is None
         ckey = tuple((c["path"], c.get("start"), c.get("end"), c["seconds"]) for c in self._clips) if custom else None
@@ -864,6 +884,22 @@ class CloneVoiceGroup:
             self._create_page.hide()
             self._active_page.show()
             self._update_active_est()
+        self._dock_task()
+
+    def _dock_task(self):
+        """The progress row with Cancel: above the estimate and 🧬 Create Voice on
+        the Create voice tab, at the bottom of the box everywhere else."""
+        if not hasattr(self, "_box_l"):
+            return
+        target = self._footer_l if self._tabs.value() == "Create voice" else self._box_l
+        if self._task.parentWidget() is not (self._footer if target is self._footer_l else self.box):
+            shown = self._task.isVisible() or self._busy
+            self._task.parentWidget().layout().removeWidget(self._task)
+            if target is self._footer_l:
+                target.insertWidget(0, self._task)
+            else:
+                target.addWidget(self._task)
+            self._task.setVisible(shown)
 
     # ── active voice ───────────────────────────────────────────────
     def _sync_picker(self):
@@ -1357,6 +1393,7 @@ class CloneVoiceGroup:
         theme.set_color(self._stage, COLORS["text_secondary"])
         self._cancel_btn.setEnabled(True)
         self._cancel_btn.setText("✖  Cancel")
+        self._dock_task()
         self._task.show()
         for b in (self._create_btn, self._install_btn, self._preview_btn, self._match_btn):
             b.setEnabled(False)

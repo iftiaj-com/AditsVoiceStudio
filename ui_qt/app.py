@@ -9,6 +9,14 @@ Effects on the right (phases 2 to 4 of docs/pyside6-migration-plan.md).
 
 Threads: the generation worker never touches a widget. It reports through
 ui_qt.bridge.ui(), which runs the call on the GUI thread.
+
+Start-up: the window opens at once with Text Input, Playback (Generate reads
+"Starting…") and a loading card on the right. A background thread imports
+the engine adapters and the pipeline and reads the system voices (about 2 s);
+the right-hand panels are then built on the GUI thread, one per event-loop
+turn so the window keeps painting. No TTS library or model loads here: the
+adapters, librosa and torch load on first use, so the first Generate with an
+engine takes longer. This module imports nothing heavy at the top.
 """
 import os
 import re
@@ -25,16 +33,12 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, Q
                                QMainWindow, QMessageBox, QScrollArea, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-from core import paths, pipeline
+from core import paths
 from core.constants import COLORS
 from core.playback import Player
-from core.synth import Synthesizer
 from core.version import APP_TITLE
 from ui_qt import bridge, icons, theme
 from ui_qt.bridge import ui
-from ui_qt.panels.customization_panel import CustomizationPanel
-from ui_qt.panels.effects_panel import EffectsPanel
-from ui_qt.panels.engine_panel import EnginePanel
 from ui_qt.panels.playback_panel import PlaybackPanel
 from ui_qt.panels.text_panel import TextPanel
 from ui_qt.widgets import IconLabel
@@ -44,12 +48,10 @@ SITE_URL = "https://www.iftiaj.com"
 
 class MainWindow(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, background=True):
+        """background=False loads the engines before returning (self-test)."""
         super().__init__()
         import pygame
-        import core.voice_cloning  # noqa: F401  (is_training / shutdown_client at close)
-        from engines.pyttsx3_engine import Pyttsx3Engine
-        from engines.registry import get_available_engines
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1180, 680)
@@ -74,9 +76,12 @@ class MainWindow(QMainWindow):
         self._play_timer.setInterval(50)
         self._play_timer.timeout.connect(self._poll_playback)
 
-        self._available_engines = get_available_engines()
-        self.synth = Synthesizer(self._available_engines)
-        self._system_voices = Pyttsx3Engine.load_system_voices() if Pyttsx3Engine.is_available() else []
+        self._available_engines = []
+        self.synth = None
+        self._system_voices = []
+        self._engine_panel = self._cust_panel = self._effects_panel = None
+        self._loaded = False
+        self._load_error = None
 
         self._audio_error = None
         try:
@@ -85,9 +90,82 @@ class MainWindow(QMainWindow):
             self._audio_error = str(e)
             print(f"Audio output unavailable: {e}")
         self._build_ui()
-        if self._audio_error:
-            self.set_status(f"⚠  No audio output device — playback disabled ({self._audio_error})",
-                            COLORS["warning"])
+        if background:
+            threading.Thread(target=self._load_worker, daemon=True, name="load-engines").start()
+        else:
+            self._on_engines_loaded(*self._load_engines())
+            while not self._loaded:
+                QApplication.processEvents()
+
+    # ── engines, loaded in the background ──────────────────────────
+    @staticmethod
+    def _load_engines():
+        """Engine discovery and the panels' imports. Runs off the GUI thread."""
+        from core import pipeline  # noqa: F401
+        import core.voice_cloning  # noqa: F401  (is_training / shutdown_client at close)
+        from engines.pyttsx3_engine import Pyttsx3Engine
+        from engines.registry import get_available_engines
+        import ui_qt.panels.customization_panel  # noqa: F401
+        import ui_qt.panels.effects_panel  # noqa: F401
+        import ui_qt.panels.engine_panel  # noqa: F401
+        engines = get_available_engines()
+        voices = Pyttsx3Engine.load_system_voices() if Pyttsx3Engine.is_available() else []
+        return engines, voices
+
+    def _load_worker(self):
+        try:
+            res = self._load_engines()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            ui(self._on_load_failed, f"{type(e).__name__}: {e}")
+            return
+        ui(self._on_engines_loaded, *res)
+
+    def _on_load_failed(self, msg):
+        self._load_error = msg
+        self._loading_label.setText("❌  The engines could not be loaded: " + msg)
+        self._loading_label.set_icon_color(COLORS["error"])
+        self.set_status(f"❌  Engines failed to load: {msg}", COLORS["error"])
+
+    def _on_engines_loaded(self, engines, voices):
+        """Build the right-hand panels, one per event-loop turn."""
+        from core.synth import Synthesizer
+        from ui_qt.panels.customization_panel import CustomizationPanel
+        from ui_qt.panels.effects_panel import EffectsPanel
+        from ui_qt.panels.engine_panel import EnginePanel
+
+        self._available_engines = engines
+        self._system_voices = voices
+        self.synth = Synthesizer(engines)
+        self._loading_label.setText("⌛  Building the panels…")
+
+        def engine():
+            self._engine_panel = EnginePanel(self._available_engines, self._system_voices)
+            self._right_l.insertWidget(0, self._engine_panel.frame)
+            QTimer.singleShot(0, customization)
+
+        def customization():
+            self._cust_panel = CustomizationPanel(app=self)
+            self._right_l.insertWidget(1, self._cust_panel.frame)
+            QTimer.singleShot(0, effects)
+
+        def effects():
+            self._effects_panel = EffectsPanel(on_edit_clones=self._open_voice_manager)
+            if self._cust_panel.clone_group is not None:
+                self._cust_panel.clone_group.attach(self._effects_panel)
+            self._right_l.insertWidget(2, self._effects_panel.frame)
+            self._loading_card.hide()
+            self._loading_card.deleteLater()
+            self._loaded = True
+            self._play_panel.set_loading(False)
+            if self._audio_error:
+                self.set_status(f"⚠  No audio output device — playback disabled ({self._audio_error})",
+                                COLORS["warning"])
+            else:
+                self.set_status("Ready — Enter text and click Generate")
+
+        engine()
 
     # ── UI ─────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -134,8 +212,9 @@ class MainWindow(QMainWindow):
         left_l.addWidget(self._text_panel.frame, 1)
         self._play_panel = PlaybackPanel(
             on_generate=self._on_generate, on_preview=self._on_preview, on_cancel=self._on_cancel,
-            on_play=self._on_play, on_stop=self._on_stop, on_save=self._on_save,
+            on_play=self._on_play, on_stop=self._on_stop, on_save_audio=self._on_save,
             on_save_srt=self._on_save_srt, on_open_folder=self._on_open_folder)
+        self._play_panel.set_loading(True)
         left_l.addWidget(self._play_panel.frame)
 
         right = QScrollArea()
@@ -146,13 +225,16 @@ class MainWindow(QMainWindow):
         self._right_l = QVBoxLayout(right_body)
         self._right_l.setContentsMargins(0, 0, 6, 0)
         self._right_l.setSpacing(12)
-        self._engine_panel = EnginePanel(self._available_engines, self._system_voices)
-        self._cust_panel = CustomizationPanel(app=self)
-        self._effects_panel = EffectsPanel(on_edit_clones=self._open_voice_manager)
-        if self._cust_panel.clone_group is not None:
-            self._cust_panel.clone_group.attach(self._effects_panel)
-        for panel in (self._engine_panel, self._cust_panel, self._effects_panel):
-            self._right_l.addWidget(panel.frame)
+        # Until the engines are loaded: one card that says so.
+        self._loading_card, lc = theme.card("🔊  TTS Engine")
+        self._loading_label = theme.label("⌛  Loading…", secondary=True)
+        self._loading_label.setWordWrap(True)
+        lc.addWidget(self._loading_label)
+        note = theme.label("Voice models load when you first generate with them. "
+                           "You can type or paste text meanwhile.", muted=True, small=True)
+        note.setWordWrap(True)
+        lc.addWidget(note)
+        self._right_l.addWidget(self._loading_card)
         self._right_l.addStretch(1)
         right.setWidget(right_body)
 
@@ -177,7 +259,7 @@ class MainWindow(QMainWindow):
         link.mousePressEvent = lambda e: QDesktopServices.openUrl(QUrl(SITE_URL))
         sb.addWidget(link)
         outer.addWidget(bar)
-        self.set_status("Ready — Enter text and click Generate")
+        self.set_status("⌛  Starting…", COLORS["accent_primary"])
 
     def refresh_cloned_voices(self, select=None):
         """Re-read the voice library into the registry, the tiles and the Clone Voice group.
@@ -190,6 +272,8 @@ class MainWindow(QMainWindow):
             refresh_cloned_voices(EFFECTS_REGISTRY)
         except Exception as e:
             print(f"Cloned voice refresh failed: {e}")
+        if not self._loaded:
+            return
         self._effects_panel.sync()
         group = self._cust_panel.clone_group
         if group is not None:
@@ -247,6 +331,7 @@ class MainWindow(QMainWindow):
 
     def _current_request(self, text, preview):
         """Settings for a run, read here on the GUI thread; the worker gets plain values."""
+        from core import pipeline
         return pipeline.GenerationRequest(
             text=text,
             eng_settings=self._engine_panel.get_settings(),
@@ -256,7 +341,8 @@ class MainWindow(QMainWindow):
         )
 
     def _start_generation(self, preview=False):
-        if self._is_generating:
+        from core import pipeline
+        if self._is_generating or not self._loaded:
             return
         text = self._text_panel.get_text().strip()
         if not text:
@@ -283,15 +369,10 @@ class MainWindow(QMainWindow):
         self._gen_notice = None
         self._stop_event.clear()
 
-        pp = self._play_panel
-        pp.generate_btn.setEnabled(False)
-        pp.generate_btn.setText("Previewing…" if preview else "Generating…")
-        pp.set_generating(True)
-        for btn in (pp.play_btn, pp.stop_btn, pp.save_btn, pp.save_srt_btn, pp.open_folder_btn,
-                    pp.preview_btn):
-            if btn is not None:
-                btn.setEnabled(False)
-        pp.set_progress(0)
+        if self._player.stop():                     # Generate while the last clip plays
+            self._play_timer.stop()
+            self._resume_ambiance()
+        self._play_panel.set_generating(True, preview=preview)
         self.set_status("Generating preview…" if preview else "Generating speech…", COLORS["warning"])
 
         threading.Thread(target=self._generate_worker, args=(req, tmp_dir), daemon=True,
@@ -299,6 +380,8 @@ class MainWindow(QMainWindow):
 
     def _generate_worker(self, req, tmp_dir):
         """Runs core.pipeline on this thread; reports to the GUI thread with ui()."""
+        from core import pipeline
+
         def progress(frac):
             ui(self._play_panel.set_progress, frac)
 
@@ -338,31 +421,23 @@ class MainWindow(QMainWindow):
         if self._is_generating:
             self._stop_event.set()
             self.set_status("⌛  Cancelling…", COLORS["warning"])
-            self._play_panel.cancel_btn.setEnabled(False)
-            self._play_panel.cancel_btn.setText("Cancelling…")
+            self._play_panel.set_cancelling()
 
     def _reset_generate_buttons(self):
         self._is_generating = False
-        pp = self._play_panel
-        pp.generate_btn.setEnabled(True)
-        pp.generate_btn.setText("⚡  Generate Speech")
-        pp.set_generating(False)
-        if pp.preview_btn is not None:
-            pp.preview_btn.setEnabled(True)
+        self._play_panel.set_generating(False)
 
     def _on_generate_finish(self, playback_file, autoplay=False):
         self._reset_generate_buttons()
         pp = self._play_panel
+        pp.set_outputs(mp3=False, wav=False, srt=False)
         if playback_file is None:
             self.set_status("⏹  Generation cancelled", COLORS["warning"])
-            pp.set_progress(0)
             return
         self._temp_playback_file = playback_file
         pp.play_btn.setEnabled(True)
-        pp.save_btn.setEnabled(True)
-        pp.save_srt_btn.setEnabled(bool(self._temp_srt and os.path.exists(self._temp_srt)))
-        if self._temp_mp3:
-            pp.open_folder_btn.setEnabled(True)
+        pp.set_outputs(mp3=self._has(self._temp_mp3), wav=bool(self._wav_source()),
+                       srt=self._has(self._temp_srt))
         if self._gen_notice:
             self.set_status(f"⚠  Speech generated. {self._gen_notice}", COLORS["warning"])
         else:
@@ -372,7 +447,6 @@ class MainWindow(QMainWindow):
 
     def _on_generate_error(self, error_msg):
         self._reset_generate_buttons()
-        self._play_panel.set_progress(0)
         self.set_status(f"❌  Error: {error_msg}", COLORS["error"])
         QMessageBox.critical(self, "Generation Error", error_msg)
 
@@ -389,19 +463,16 @@ class MainWindow(QMainWindow):
         if amb and amb.get_busy():
             amb.pause()
         self._player.play(pf)
-        pp = self._play_panel
-        pp.play_btn.setText("▶  Playing…")
-        pp.play_btn.setEnabled(False)
-        pp.stop_btn.setEnabled(True)
+        self._play_panel.set_playing(True)
         self.set_status("🎵  Playing audio…", COLORS["accent_primary"])
         self._play_timer.start()
 
     def _poll_playback(self):
-        """Move the progress bar while the audio plays."""
+        """Fill the Stop button with the playback position while the audio plays."""
         try:
             playing = self._player.is_playing()
             if playing:
-                self._play_panel.set_progress(self._player.fraction())
+                self._play_panel.set_play_progress(self._player.fraction())
         except Exception:
             playing = False
         if not playing:
@@ -409,11 +480,7 @@ class MainWindow(QMainWindow):
             self._on_playback_done()
 
     def _reset_play_buttons(self):
-        pp = self._play_panel
-        pp.play_btn.setText("▶  Play")
-        pp.play_btn.setEnabled(True)
-        pp.stop_btn.setEnabled(False)
-        pp.set_progress(0)
+        self._play_panel.set_playing(False)
 
     def _resume_ambiance(self):
         amb = self._cust_panel.ambiance_channel
@@ -447,24 +514,36 @@ class MainWindow(QMainWindow):
         files = dlg.selectedFiles()
         return os.path.normpath(files[0]) if files else None
 
-    def _on_save(self):
-        sf = self._temp_save_file
-        if not sf or not os.path.exists(sf):
+    @staticmethod
+    def _has(path):
+        return bool(path and os.path.exists(path))
+
+    def _wav_source(self):
+        """A WAV of the last generation, or an MP3 to convert (online engines without effects)."""
+        for f in (self._temp_save_file, self._temp_playback_file):
+            if self._has(f) and f.lower().endswith(".wav"):
+                return f
+        return self._temp_save_file if self._has(self._temp_save_file) else None
+
+    def _on_save(self, fmt="mp3"):
+        """Save menu → MP3 or WAV. The SRT, when there is one, goes beside it."""
+        src = self._temp_mp3 if fmt == "mp3" else self._wav_source()
+        if not self._has(src):
             self.set_status("⚠  No audio to save — generate first", COLORS["warning"])
             return
-        has_mp3 = bool(self._temp_mp3 and os.path.exists(self._temp_mp3))
-        if has_mp3:
-            ext, filters = ".mp3", ["MP3 Audio (*.mp3)", "WAV Audio (*.wav)", "All Files (*.*)"]
-        else:
-            ext, filters = ".wav", ["WAV Audio (*.wav)", "All Files (*.*)"]
-        filepath = self._ask_save_path("Save Speech Audio", self._default_name("adits_voice_studio", ext),
-                                       filters, ext[1:])
+        ext = "." + fmt
+        filters = [f"{fmt.upper()} Audio (*{ext})", "All Files (*.*)"]
+        filepath = self._ask_save_path(f"Save Speech Audio ({fmt.upper()})",
+                                       self._default_name("adits_voice_studio", ext), filters, fmt)
         if not filepath:
             return
         try:
             os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            src = self._temp_mp3 if (filepath.lower().endswith(".mp3") and has_mp3) else sf
-            shutil.copy2(src, filepath)
+            if fmt == "wav" and not src.lower().endswith(".wav"):
+                from core.audio_io import load_segment
+                load_segment(src).export(filepath, format="wav")
+            else:
+                shutil.copy2(src, filepath)
             if self._temp_srt and os.path.exists(self._temp_srt):
                 shutil.copy2(self._temp_srt, os.path.splitext(filepath)[0] + ".srt")
                 self.set_status(f"💾  Saved audio & subtitles to {os.path.basename(filepath)}",
@@ -472,7 +551,6 @@ class MainWindow(QMainWindow):
             else:
                 self.set_status(f"💾  Saved to {os.path.basename(filepath)}", COLORS["success"])
             self._final_saved_file = filepath
-            self._play_panel.open_folder_btn.setEnabled(True)
         except Exception as e:
             self.set_status(f"❌  Save error: {e}", COLORS["error"])
 
@@ -488,7 +566,6 @@ class MainWindow(QMainWindow):
         try:
             shutil.copy2(sf, filepath)
             self._final_saved_file = filepath
-            self._play_panel.open_folder_btn.setEnabled(True)
             self.set_status(f"💾  Saved SRT to {os.path.basename(filepath)}", COLORS["success"])
         except Exception as e:
             self.set_status(f"❌  Save error: {e}", COLORS["error"])
@@ -524,8 +601,9 @@ class MainWindow(QMainWindow):
                 return
         self._stop_event.set()
         self._play_timer.stop()
-        if self._cust_panel.clone_group is not None:
-            self._cust_panel.clone_group.cleanup()      # stops clone tasks and previews
+        cust = self._cust_panel                 # None if closed while the engines load
+        if cust is not None and cust.clone_group is not None:
+            cust.clone_group.cleanup()      # stops clone tasks and previews
         self._text_panel.cleanup()          # closes the dictation mic, stops a transcription
         try:
             pygame.mixer.quit()
@@ -536,7 +614,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Voice cloning shutdown failed: {e}")
         self._cleanup_tmp_dirs()
-        self._cust_panel.cleanup()          # ambiance preview temp files
+        if cust is not None:
+            cust.cleanup()                  # ambiance preview temp files
         event.accept()
 
 

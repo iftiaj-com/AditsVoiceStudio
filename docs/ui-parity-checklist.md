@@ -16,6 +16,19 @@ the sections it touches. Tick a box only after trying it in the Qt build.
 * "Phase" tags say when each section is ported: P2 = Phase 2, P3 = Phase 3,
   P4 = Phase 4.
 
+## Deliberate changes after the port (2026-10-14)
+
+The Qt window no longer matches these CTk items on purpose:
+
+* **Playback & Export** (rows 86 to 105 below): one primary button. Generate
+  becomes Cancel with the progress inside it; no progress bar, no separate
+  Cancel. Play / Stop is one toggle. Save MP3 and Save SRT are one Save menu
+  (MP3, WAV, SRT). Folder is always enabled.
+* **Start-up**: the window opens before the engines load; Generate and Preview
+  read "Loading engines…" and are disabled until the panels are built.
+* **Clone Voice → Clean-up**: no "Skip silences" switch (rows 385 and 458).
+  Preview cleanup and ▶ Original / ▶ Cleaned sit in its column.
+
 ## Known issues in the current UI
 
 Found while reading. Decide per item whether the port copies the behavior

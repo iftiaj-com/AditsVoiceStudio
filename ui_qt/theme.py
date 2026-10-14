@@ -144,6 +144,7 @@ QPushButton[role="outline"]:hover {{ background: {C['accent_primary']}; }}
 QPushButton[role="outline"]:disabled {{ border-color: #3E3A80; }}
 QPushButton[role="outline"][accent="secondary"] {{ border-color: {C['accent_secondary']}; }}
 QPushButton[role="outline"][accent="secondary"]:hover {{ background: {C['accent_secondary']}; }}
+QPushButton[role="outline"][accent="secondary"]:disabled {{ border-color: #5A2A44; }}
 
 QPushButton[role="stop"] {{ background: {C['bg_input']}; border-color: {C['error']}; }}
 QPushButton[role="stop"]:hover {{ background: {C['error']}; }}
@@ -369,12 +370,13 @@ def line_button(text, color, tip=None, height=None, small=False):
     return b
 
 
-def button(text, role, tip=None, small=False, **props):
+def button(text, role, tip=None, small=False, cls=None, **props):
     """An IconButton with a theme role (and optional tooltip / extra style properties).
 
     A leading emoji in *text* becomes a line icon (ui_qt.icons); "&" is shown
-    as is (Qt would read it as a keyboard shortcut marker)."""
-    b = IconButton(text)
+    as is (Qt would read it as a keyboard shortcut marker). *cls* picks an
+    IconButton subclass, such as widgets.ProgressButton."""
+    b = (cls or IconButton)(text)
     b.setProperty("role", role)
     if small:
         b.setProperty("small", True)

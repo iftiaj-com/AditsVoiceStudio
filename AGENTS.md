@@ -50,6 +50,7 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `├── synth.py` | Synthesizer | `Synthesizer` (`app.synth`): the engine map, `lock` (one `engine.synthesize()` at a time), `engine_kwargs()` and `synthesize(text, tmp_dir, eng_settings)`. Used by generation, the Clone Voice tools and the voice match. |
 | `├── voice_selection.py` | Engine Selections | Engine kinds, speed ranges and labels (`format_speed`), `describe_selection`, `synthesis_key`, and resolving a cloned voice's base voice against the engines and voices on offer (`resolve_selection`, `settings_for_selection`). Both engine panels and the Clone Voice code use it; the CTk `EnginePanel` keeps its method names and calls these. |
 | `├── defaults.py` | Starting Settings | `engine_settings()`, `customization_settings()`, `active_effects()`: the panels' `get_settings()` values right after start, as plain dicts. The Qt UI generates with them until it has those panels. Keep them equal to the CTk panels' starting values. |
+| `├── gpu.py` | GPU Check | `cuda_available()`: `torch.cuda.is_available()` without importing torch (about 3 s). Uses torch's own answer once torch is loaded; otherwise checks for a CUDA build of torch (`torch_cuda.dll`) and asks `nvcuda.dll` for a device (0.08 s). Used for the GPU toggle, the engine device and Whisper. |
 | `├── playback.py` | Playback | `Player`: plays the generated speech on `pygame.mixer.music`. No thread: the UI polls `is_playing()` / `fraction()` from a timer. |
 | `├── selftest.py` | Self-test | `AditsVoiceStudio.exe --selftest report.json` runs every offline engine headless and checks real output. |
 | `├── constants.py` | Configuration Module | Holds application-wide design tokens (colors, font configurations) and static lists of languages/voices. |
@@ -95,13 +96,13 @@ Below is the directory structure mapping each component of the Adits Voice Studi
 | `    ├── record_dialog.py` | GUI Widget | Microphone recorder for clone clips: device picker, level meter, live waveform, preview with seek, Add to clips. |
 | `    ├── timeline_dialog.py` | GUI Widget | Waveform timeline for choosing the part of a clip to clone from (drag, resize, zoom, play). |
 | `    └── playback_panel.py` | GUI Widget | Renders the primary action buttons (Generate, Play, Stop, Save MP3, Save SRT, Open Folder) and progress bars. |
-| **`ui_qt/`** | Directory | The PySide6 window, the default since migration phase 6 (see `docs/pyside6-migration-plan.md`). The classic CustomTkinter window in `ui/` stays for one release as a fallback: `tts_app.py --ui ctk` or `ADITS_UI=ctk`. Has the main window, every panel, the Clone Voice group and its four dialogs. |
+| **`ui_qt/`** | Directory | The PySide6 window, the default since migration phase 6 (see `docs/pyside6-migration-plan.md`). The classic CustomTkinter window in `ui/` stays for one release as a fallback: `tts_app.py --ui ctk` or `ADITS_UI=ctk`. Has the main window, every panel, the Clone Voice group and its four dialogs. `ui_qt/app.py` imports nothing heavy at the top: the window opens with Text Input, Playback (Generate reads "Starting…") and a loading card, while a thread imports the engine adapters and `core.pipeline` and reads the system voices; the right-hand panels are then built one per event-loop turn. No TTS library or model loads at start (see *Which engines appear in the dropdown*): measured from source, window at 2.0 s and panels ready at 4.8 s, against about 27 s before. The first Generate with an engine pays for its imports instead. `MainWindow(background=False)` loads before returning, for the self-test. |
 | `├── app.py` | Qt Main Window | `MainWindow` and `run()`: header, fixed 50/50 columns, status bar, and the generation, playback and save flow through `core.pipeline`. The right column is a placeholder until the engine, customization and effects panels are ported. |
 | `├── theme.py` | Qt Look | One style sheet from `COLORS` / `FONTS` (font sizes as px, like CTk). Buttons get their look from the `role` property. `icon_font()` sets a font the sheet cannot override. |
 | `├── bridge.py` | Thread Bridge | `ui(fn, *args)` runs a call on the GUI thread through a queued signal, the Qt counterpart of `after(0, ...)`. Workers must never touch a widget directly. |
 | `├── icons.py` | Line Icons | The Qt window shows no emoji. `split(text)` turns a leading emoji ("✅  Saved", "🎤") into a Lucide icon name and the plain text; `effect_icon(key)` picks one icon per effect (cloned voices: `dna`); `pixmap()` / `icon()` draw an SVG in any color at the screen's pixel ratio, cached. To add an icon, put its SVG from the same lucide-static version in `assets/icons/lucide/` and map it in `EMOJI` or `EFFECTS`. The shared registry and core messages keep their emoji for the CTk window. |
-| `├── widgets.py` | Shared Widgets | `IconLabel` / `IconButton` (QLabel / QPushButton that show a leading emoji as an icon in the text color, also after `setText`; `theme.label()`, `theme.button()` and card titles create them), `ToggleSwitch` (drawn like CTkSwitch, optional icon, text cut with …), `ValueSlider` (float range over QSlider's ints, `set_range()`), `Segmented` (CTkSegmentedButton), `ElidedLabel`, `SeekSlider` (milliseconds; a click on the groove jumps there) and `ask_choice()` (Replace / Append / Cancel style question). |
-| `└── panels/` | Directory | `text_panel.py`, `playback_panel.py`, `engine_panel.py`, `customization_panel.py` and `effects_panel.py`, ported from `ui/panels/` with the same behavior and public methods (`docs/ui-parity-checklist.md`). The effects panel keeps one on/off value per key and redraws every switch showing it (tile, Favourites mirror, search row), in place of CTk's shared `BooleanVar`; it reads and writes the same `favourites.json`. In `text_panel.py` the phrase being dictated shows in a gray line under the box, because Qt clears the undo history when undo is switched off. When the card is narrow, `playback_panel.py` puts its six buttons in two rows of three instead of clipping their text. `clone_voice_group.py` (the Clone Voice box; the Active voice picker is a QComboBox with a ♥ delegate), `clone_voice_dialog.py` (✏️ Cloned Voices), `record_dialog.py`, `timeline_dialog.py` and `analyzer_dialog.py` follow their CTk counterparts; their jobs come from `core/voice_cloning/tasks.py`. |
+| `├── widgets.py` | Shared Widgets | `IconLabel` / `IconButton` (QLabel / QPushButton that show a leading emoji as an icon in the text color, also after `setText`; IconLabel centres the icon on the first text line wherever alignment and wrapping put it, and IconButton takes the Active palette color so a button built disabled does not keep a grey icon; `theme.label()`, `theme.button()` and card titles create them), `ToggleSwitch` (drawn like CTkSwitch, optional icon, text cut with …), `ValueSlider` (float range over QSlider's ints, `set_range()`), `Segmented` (CTkSegmentedButton), `ProgressButton` (IconButton with a translucent fill from the left, `set_progress()`), `ElidedLabel`, `SeekSlider` (milliseconds; a click on the groove jumps there) and `ask_choice()` (Replace / Append / Cancel style question). |
+| `└── panels/` | Directory | `text_panel.py`, `playback_panel.py`, `engine_panel.py`, `customization_panel.py` and `effects_panel.py`, ported from `ui/panels/` with the same behavior and public methods (`docs/ui-parity-checklist.md`). The effects panel keeps one on/off value per key and redraws every switch showing it (tile, Favourites mirror, search row), in place of CTk's shared `BooleanVar`; it reads and writes the same `favourites.json`. In `text_panel.py` the phrase being dictated shows in a gray line under the box, because Qt clears the undo history when undo is switched off. `playback_panel.py` has one filled button, Generate, which turns into Cancel while a run is on, with the progress filling it from the left and the percentage in its text (no separate progress bar). Play and Stop are one toggle, filled by the playback position. Save is a menu: MP3, WAV (converted from the MP3 when an online engine made no WAV) or SRT; an MP3 or WAV save also writes the SRT beside it. Folder is always on. The Clean-up tile in `clone_voice_group.py` has no Skip silences switch (it always sends `skip_silences=False`); its third column holds Preview cleanup and ▶ Original / ▶ Cleaned, shown only while music removal is on. `clone_voice_group.py` (the Clone Voice box; the Active voice picker is a QComboBox with a ♥ delegate), `clone_voice_dialog.py` (✏️ Cloned Voices), `record_dialog.py`, `timeline_dialog.py` and `analyzer_dialog.py` follow their CTk counterparts; their jobs come from `core/voice_cloning/tasks.py`. |
 | **`docs/`** | Directory | `pyside6-migration-plan.md` (phases and results) and `ui-parity-checklist.md` (every control of the CTk UI, with possible bugs found). |
 | **`vc_runtime/`** | Directory | Code that runs **inside** the voice-cloning venvs and is never imported by the app: `worker.py`, `vc_common.py`, `rvc_backend.py`, `seedvc_backend.py`, `train_site/sitecustomize.py`, and the pinned `requirements-*.txt` / `.lock.txt`. |
 | **`vc_runtime_data/`** | Directory (gitignored) | The installed runtime when running from source: venvs, Applio and seed-vc clones, logs, and the voice library. |
@@ -371,7 +372,9 @@ There are three ways to make a voice:
   row when the box is at least `WIDE_PX` (600 unscaled px) wide, else one; a tile
   alone in its row spans the box, and Clean-up then shows its three options side
   by side. ▶ Preview moves under the base voice for RVC voices so both tiles end
-  level. Explanations are hover tips (`_Tip`), not notes under the controls.
+  level. In the Qt window the progress row with ✖ Cancel sits above the
+  estimate and 🧬 Create Voice on the Create voice tab, and at the bottom of
+  the box on Active voice (`_dock_task()`). Explanations are hover tips (`_Tip`), not notes under the controls.
   Never grid an empty `CTkFrame`: it keeps its default 200 px height.
 * **Voice Effects → Cloned Voices → ✏️:** rename or delete voices, or change a
   voice's settings. **🔊 Voice settings ▾** opens an editor in the row: the base
@@ -468,7 +471,10 @@ first, and cloning reads those copies (`clip["used"]`). The originals in
 * **Skip silences.** Applied last, to the trimmed and cleaned audio: pauses
   longer than 0.4 s are removed (threshold 16 dB under the clip's average,
   never above -40 dBFS, 150 ms kept around each phrase). Order: trim, remove
-  music / noise, skip silences. Stored as `prep.skip_silences`.
+  music / noise, skip silences. Stored as `prep.skip_silences`. Only the CTk
+  window still offers it. The Qt window dropped the switch on 2026-10-14: the
+  Seed-VC reference builder already removes long pauses, and Applio's
+  preprocessing slices training audio on silence, so it changed little.
 
 Measured on `Voices-training\BLJ Voice over.mp3` (68.9 s, voice over music): the
 voice stem transcribed the same as the original; music-only stretches dropped
@@ -847,9 +853,18 @@ Running from source keeps the old layout (`output/`, repo-root weights, normal H
 The engine list is **not** hardcoded. `get_available_engines()` in
 [registry.py](file:///e:/Develop/Antigravity_testing/tts_app%20modular/engines/registry.py)
 filters `ENGINE_CLASSES` by each class's `is_available()`, and
-`EnginePanel` renders whatever survives. Most adapters set `_AVAILABLE` from a
-bare `try: import ...` at module scope, so **a missing library silently removes
-its engine from the UI** with no error anywhere.
+`EnginePanel` renders whatever survives. The adapters set `_AVAILABLE` from
+`importlib.util.find_spec()` (gTTS, Edge, Piper, MeloTTS) or a cheap import
+(pyttsx3), and import their libraries inside `synthesize()`, so **a missing
+library silently removes its engine from the UI** with no error anywhere, and
+a broken one only fails on first use.
+
+Keep engine libraries out of module scope. Until 2026-10-14 `kokoro_engine.py`
+imported the PyTorch `kokoro` package at the top (torch, transformers, librosa:
+about 14.5 s), even though the ONNX backend needs none of it, and the Qt engine
+card imported torch for the GPU toggle (about 3 s). `effects/audio_effects.py`
+reaches librosa and `scipy.signal` through `_OnFirstUse`, which imports them on
+first attribute access.
 
 If the dropdown is short, check the adapter's import rather than the UI:
 

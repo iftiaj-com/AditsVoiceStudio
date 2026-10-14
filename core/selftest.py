@@ -139,7 +139,7 @@ def run(report_path):
         app.setStyle("Fusion")
         app.setStyleSheet(theme.stylesheet())
         bridge.install()
-        win = MainWindow()
+        win = MainWindow(background=False)
         app.processEvents()
         info = {"platform": app.platformName(), "title": win.windowTitle(),
                 "engines": win.engine_panel.engine_names(),

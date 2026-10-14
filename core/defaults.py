@@ -28,11 +28,11 @@ def engine_settings(engine_names, system_voices) -> dict:
     engine_names: available engine names, in registry order.
     system_voices: [(name, voice_id)] from Pyttsx3Engine.load_system_voices().
     """
-    import torch
+    from core.gpu import cuda_available
     lang = "American English"
     return {
         "engine_name":      default_engine_name(engine_names),
-        "use_gpu":          torch.cuda.is_available(),
+        "use_gpu":          cuda_available(),
         "gtts_lang_key":    "English (US)",
         "edge_voice_key":   next(iter(EDGE_VOICES)),
         "edge_rate":        0,

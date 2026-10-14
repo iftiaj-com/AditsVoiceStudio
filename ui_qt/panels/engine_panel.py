@@ -10,11 +10,11 @@ engine_names, voice_choices, plus the static helpers), so the generation
 code and the Clone Voice code can use either. The selection rules live in
 core.voice_selection.
 """
-import torch
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QSizePolicy, QWidget
 
 from core import voice_selection
+from core.gpu import cuda_available
 from core.constants import (COLORS, EDGE_VOICES, GTTS_LANGUAGES, KOKORO_LANGS, KOKORO_VOICES,
                             MELO_VOICES, PIPER_VOICES)
 from ui_qt import theme
@@ -57,7 +57,7 @@ class EnginePanel:
         self._engine_menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         row.addWidget(self._engine_menu, 1)
         row.addSpacing(6)
-        self._gpu = ToggleSwitch("GPU Acceleration (PyTorch)", torch.cuda.is_available(),
+        self._gpu = ToggleSwitch("GPU Acceleration (PyTorch)", cuda_available(),
                                  on_color=COLORS["success"])
         self._gpu.setFont(theme.font("body_small"))
         self._gpu.set_text_color(COLORS["text_secondary"])

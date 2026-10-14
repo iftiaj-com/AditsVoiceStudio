@@ -3,15 +3,13 @@ engines/piper_engine.py  –  Piper TTS adapter
 """
 import os
 import wave
+import importlib.util
 from engines.base import BaseTTSEngine
 from core import paths
 from core.model_cache import MODEL_CACHE
 
-try:
-    import piper  # noqa: F401
-    _AVAILABLE = True
-except ImportError:
-    _AVAILABLE = False
+# piper (onnxruntime) is imported on first use.
+_AVAILABLE = importlib.util.find_spec("piper") is not None
 
 
 class PiperEngine(BaseTTSEngine):
