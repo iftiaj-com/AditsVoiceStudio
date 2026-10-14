@@ -50,6 +50,10 @@ class BaseTTSEngine(ABC):
         engines with nothing to load (online, system voices) keep this no-op."""
         return None
 
+    def release_gpu(self) -> None:
+        """Drop GPU models this engine holds itself (not those in MODEL_CACHE)."""
+        return None
+
     def _speak_once(self, **kwargs) -> None:
         """A warm_up() body: speak "Hello." into a temp folder and drop it.
 

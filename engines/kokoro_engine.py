@@ -339,13 +339,20 @@ class KokoroEngine(BaseTTSEngine):
                      else KModel(repo_id=_HF_REPO))
             self._shared_model = model.to(device_str).eval()
             self._shared_device = device_str
-        pipeline = KPipeline(lang_code=lang_code, model=self._shared_model)
+        pipeline = KPipeline(lang_code=lang_code, repo_id=_HF_REPO, model=self._shared_model)
         self._pipelines[("torch", lang_code)] = pipeline
         self._use_onnx = False
         return pipeline
 
     def warm_up(self, **kwargs):
         self._speak_once(**kwargs)
+
+    def release_gpu(self):
+        """Drop the PyTorch model if it sits on the GPU (about 0.7 GB with its CUDA context)."""
+        if self._shared_device == "cuda":
+            self._pipelines = {k: v for k, v in self._pipelines.items() if k[0] != "torch"}
+            self._shared_model = None
+            self._shared_device = None
 
     def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
         import numpy as np

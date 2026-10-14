@@ -358,6 +358,8 @@ def train(ctx, name, clips, eng, voice, eng_settings, opts, base_sel=None, prep=
         ctx.progress(0.02, "Converting clips for training…")
         ds = library.build_dataset(p)
         ctx.check_cancel()
+        ctx.progress(None, "Freeing GPU memory for training…")
+        ctx.synth.release_gpu()             # the app's TTS models; they load again on the next use
         p = library.update_params(p.slug, status="training", batch_size=opts["batch_size"])
 
         def on_progress(ev):

@@ -106,6 +106,16 @@ class MeloEngine(BaseTTSEngine):
     def warm_up(self, **kwargs):
         self._speak_once(**kwargs)
 
+    def release_gpu(self):
+        """MeloTTS keeps each language's BERT in a module global (melo.text.*_bert:
+        `model` or `models`), outside MODEL_CACHE: about 0.5 GB on the GPU for English."""
+        for name, mod in list(sys.modules.items()):
+            if name.startswith("melo.text.") and name.endswith("_bert"):
+                if getattr(mod, "model", None) is not None:
+                    mod.model = None
+                if isinstance(getattr(mod, "models", None), dict):
+                    mod.models.clear()
+
     def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
         device_str = kwargs.get("device", "cpu")
         status_cb  = kwargs.get("status_cb", None)
@@ -124,5 +134,9 @@ class MeloEngine(BaseTTSEngine):
         speed = kwargs.get("melo_speed", 1.0)
         wav_path = os.path.join(tmp_dir, "output.wav")
         model.tts_to_file(text, spk_id, wav_path, speed=speed)
+        # The first call imports nltk, and a traceback saved during that import
+        # keeps this frame alive, and with it `model` (about 0.25 GB of GPU
+        # memory that MODEL_CACHE.clear() could then not free).
+        del model
 
         return {"playback_file": wav_path, "save_file": wav_path, "save_ext": ".wav"}

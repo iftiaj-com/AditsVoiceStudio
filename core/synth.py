@@ -75,6 +75,25 @@ class Synthesizer:
             engine.warm_up(**kwargs)
         return True
 
+    def release_gpu(self):
+        """Free the GPU memory the app's own models hold (before RVC training).
+
+        Kokoro on the GPU stays loaded for the whole session, and MODEL_CACHE
+        keeps MeloTTS, Piper and Whisper for 20 idle minutes: about 1.5 GB of a
+        4 GB card with all three, which training needs more than the app does.
+        """
+        from core.model_cache import MODEL_CACHE
+        with self.lock:
+            for engine in self.engine_map.values():
+                engine.release_gpu()
+            MODEL_CACHE.clear()
+        import gc
+        import sys
+        gc.collect()
+        torch = sys.modules.get("torch")
+        if torch is not None and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def synthesize(self, text, tmp_dir, eng_settings, status_cb=None, check_cancel=None) -> dict:
         """Speak *text* with the engine and voice in *eng_settings*; returns the engine's result dict.
 

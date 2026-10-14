@@ -11,7 +11,7 @@ def get_whisper_model():
     """Return the cached Whisper model, loading it on first use.
 
     The model stays resident between runs and is evicted automatically by
-    MODEL_CACHE after ~5 minutes of inactivity, so back-to-back generations
+    MODEL_CACHE after 20 minutes of inactivity, so back-to-back generations
     skip the multi-second reload without permanently hogging VRAM.
     """
     def _load():
