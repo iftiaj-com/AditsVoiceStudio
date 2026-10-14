@@ -372,7 +372,11 @@ class Segmented(QWidget):
             b.setCheckable(True)
             b.setAutoDefault(False)
             b.setCursor(Qt.PointingHandCursor)
-            b.setFixedHeight(self._height)
+            # The height goes in the button's own style sheet: the app sheet's
+            # min-height would otherwise override setFixedHeight() when the
+            # button is polished (the tabs came out 2 px tall at start).
+            h = self._height - 2                    # minus the 1 px border, top and bottom
+            b.setStyleSheet(f"QPushButton {{ min-height: {h}px; max-height: {h}px; }}")
             b.setProperty("role", "seg")
             b.setProperty("pos", "only" if len(values) == 1 else
                           "first" if i == 0 else "last" if i == len(values) - 1 else "mid")
