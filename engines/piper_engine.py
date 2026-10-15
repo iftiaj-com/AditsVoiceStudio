@@ -3,15 +3,13 @@ engines/piper_engine.py  –  Piper TTS adapter
 """
 import os
 import wave
+import importlib.util
 from engines.base import BaseTTSEngine
 from core import paths
 from core.model_cache import MODEL_CACHE
 
-try:
-    import piper  # noqa: F401
-    _AVAILABLE = True
-except ImportError:
-    _AVAILABLE = False
+# piper (onnxruntime) is imported on first use.
+_AVAILABLE = importlib.util.find_spec("piper") is not None
 
 
 class PiperEngine(BaseTTSEngine):
@@ -21,13 +19,22 @@ class PiperEngine(BaseTTSEngine):
     def is_available() -> bool:
         return _AVAILABLE
 
-    def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
-        from piper import PiperVoice
-        status_cb  = kwargs.get("status_cb", None)
+    def warm_up(self, **kwargs):
+        self._speak_once(**kwargs)
 
+    def synthesize(self, text: str, tmp_dir: str, **kwargs) -> dict:
+        status_cb  = kwargs.get("status_cb", None)
         if status_cb:
             status_cb("Loading Piper voice…")
+        voice    = self._voice(**kwargs)
+        wav_path = os.path.join(tmp_dir, "output.wav")
+        with wave.open(wav_path, "wb") as w:
+            voice.synthesize_wav(text, w)
 
+        return {"playback_file": wav_path, "save_file": wav_path, "save_ext": ".wav"}
+
+    def _voice(self, **kwargs):
+        from piper import PiperVoice
         voice_id = kwargs.get("voice_key", "en_US-ljspeech-medium")
         model_name = f"{voice_id}.onnx"
 
@@ -49,10 +56,5 @@ class PiperEngine(BaseTTSEngine):
                 download_dir=str(paths.user_dir("models") / "piper") if paths.FROZEN else None,
             )
 
-        # Cached per model file; idle-evicted by MODEL_CACHE after 5 min.
-        voice    = MODEL_CACHE.get(("piper", model_path), _load)
-        wav_path = os.path.join(tmp_dir, "output.wav")
-        with wave.open(wav_path, "wb") as w:
-            voice.synthesize_wav(text, w)
-
-        return {"playback_file": wav_path, "save_file": wav_path, "save_ext": ".wav"}
+        # Cached per model file; idle-evicted by MODEL_CACHE.
+        return MODEL_CACHE.get(("piper", model_path), _load)

@@ -1,1 +1,1 @@
-# Adits Voice Studio UI panels sub-package
+# Adits Voice Studio Qt UI panels sub-package

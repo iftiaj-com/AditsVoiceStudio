@@ -1,183 +1,191 @@
 """
-ui/panels/playback_panel.py  –  Playback & Export card
+ui/panels/playback_panel.py  –  Playback & Export card (Qt)
+
+    🎧 Playback & Export
+    [ ⚡ Generate Speech                          ] [🎧 Preview]
+    [ ▶ Play               ] [ 💾 Save ▾          ] [📂 Folder ]
+
+Generate is the only filled (primary) button. While a generation runs it
+turns into Cancel, and the progress fills it from the left; there is no
+separate progress bar. Play and Stop are one toggle, and the playback
+position fills it the same way. Save opens a menu: MP3, WAV or SRT. Items
+that have nothing to save are greyed out.
+
+Until the panels are built (MainWindow finds the engines in the background,
+about 2 s), Generate reads "Starting…" and is disabled.
 """
-import customtkinter as ctk
-from core.constants import COLORS, FONTS
-from ui.theme import card
+from PySide6.QtCore import QPoint
+from PySide6.QtGui import QFontMetrics
+from PySide6.QtWidgets import QHBoxLayout, QMenu, QSizePolicy
+
+from core.constants import COLORS
+from ui import theme
+from ui.widgets import ProgressButton
+
+GENERATE_TEXT = "⚡  Generate Speech"
+LOADING_TEXT = "⌛  Starting…"
+PLAY_TEXT = "▶  Play"
+STOP_TEXT = "■  Stop"
+
+
+def _fix_width(btn, *texts):
+    """Minimum width that fits the widest of *texts*; ignore the changing size hint."""
+    # The style sheet sets the font when the button is first shown, so measure
+    # with the theme font rather than btn.fontMetrics().
+    fm = QFontMetrics(theme.font("button"))
+    widest = max(fm.horizontalAdvance(" " + t) for t in (btn.text(),) + texts)
+    icon_w = fm.height() + 2 if btn.icon_name() else 0     # IconButton's icon, about one line tall
+    btn.setMinimumWidth(widest + icon_w + 28)       # padding and border
+    btn.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+
+
+def _set_role(btn, role):
+    if btn.property("role") != role:
+        btn.setProperty("role", role)
+        theme.repolish(btn)
 
 
 class PlaybackPanel:
-    def __init__(self, parent, on_generate, on_cancel, on_play, on_stop, on_save, on_save_srt, on_open_folder, row=None, on_preview=None):
-        if row is not None:
-            frame = card(parent, row, "🎧  Playback & Export")
-            btn_height = 44
-            play_width = 110
-            stop_width = 110
-            save_width = 130
-            srt_width = 130
-            folder_width = 130
-            use_grid_layout = False
-        else:
-            frame = ctk.CTkFrame(
-                parent, fg_color=COLORS["bg_card"],
-                corner_radius=14, border_width=1, border_color=COLORS["border"]
-            )
-            frame.pack(fill="x", padx=16, pady=6)
-            
-            ctk.CTkLabel(
-                frame, text="🎧  Playback & Export",
-                font=FONTS["subtitle"],
-                text_color=COLORS["text_primary"],
-            ).pack(anchor="w", padx=16, pady=(14, 10))
-            
-            btn_height = 38
-            play_width = 75
-            stop_width = 75
-            save_width = 100
-            srt_width = 100
-            folder_width = 85
-            use_grid_layout = True
+    def __init__(self, on_generate, on_cancel, on_play, on_stop, on_save_audio, on_save_srt,
+                 on_open_folder, on_preview=None):
+        """on_save_audio(fmt) is called with "mp3" or "wav"."""
+        self._on_generate = on_generate
+        self._on_cancel = on_cancel
+        self._on_play = on_play
+        self._on_stop = on_stop
+        self._generating = False
+        self._playing = False
+        self._loading = False
 
-        self.progress = ctk.CTkProgressBar(frame, height=6,
-                                           fg_color=COLORS["slider_track"],
-                                           progress_color=COLORS["accent_primary"],
-                                           corner_radius=3)
-        self.progress.pack(fill="x", padx=16, pady=(0, 12))
-        self.progress.set(0)
+        self.frame, lay = theme.card("🎧  Playback & Export")
 
-        if not use_grid_layout:
-            btn_row = ctk.CTkFrame(frame, fg_color="transparent")
-            btn_row.pack(fill="x", padx=16, pady=(0, 14))
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        self.generate_btn = theme.button(GENERATE_TEXT, theme.ROLE_PRIMARY, cls=ProgressButton)
+        self.generate_btn.clicked.connect(self._main_clicked)
+        _fix_width(self.generate_btn, LOADING_TEXT, "✖  Cancel preview  100%", "⌛  Cancelling…")
+        self.generate_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row1.addWidget(self.generate_btn, 1)
+        self.preview_btn = None
+        if on_preview is not None:
+            self.preview_btn = theme.button("🎧  Preview", theme.ROLE_OUTLINE, accent="secondary",
+                                            tip="Speak only the first sentence, then play it")
+            self.preview_btn.setFixedWidth(118)
+            self.preview_btn.clicked.connect(on_preview)
+            row1.addWidget(self.preview_btn)
+        lay.addLayout(row1)
 
-            self.generate_btn = ctk.CTkButton(
-                btn_row, text="⚡  Generate Speech", font=FONTS["button"],
-                fg_color=COLORS["accent_primary"], hover_color=COLORS["accent_secondary"],
-                corner_radius=10, height=btn_height, command=on_generate)
-            self.generate_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        self.play_btn = theme.button(PLAY_TEXT, theme.ROLE_OUTLINE, cls=ProgressButton)
+        self.play_btn.clicked.connect(self._play_clicked)
+        _fix_width(self.play_btn, STOP_TEXT)
 
-            self.preview_btn = None
-            if on_preview is not None:
-                self.preview_btn = ctk.CTkButton(
-                    btn_row, text="🎧  Preview", font=FONTS["button"],
-                    fg_color=COLORS["bg_input"], hover_color=COLORS["accent_secondary"],
-                    border_color=COLORS["accent_secondary"], border_width=2,
-                    corner_radius=10, height=btn_height, width=110, command=on_preview)
-                self.preview_btn.pack(side="left", padx=6)
+        self.save_btn = theme.button("💾  Save  ▾", theme.ROLE_OUTLINE,
+                                     tip="Save the audio as MP3 or WAV, or the subtitles as SRT")
+        _fix_width(self.save_btn)
+        self.save_menu = QMenu(self.save_btn)
+        self.save_mp3_act = self.save_menu.addAction("MP3 audio (.mp3)")
+        self.save_wav_act = self.save_menu.addAction("WAV audio (.wav)")
+        self.save_menu.addSeparator()
+        self.save_srt_act = self.save_menu.addAction("Subtitles (.srt)")
+        self.save_mp3_act.triggered.connect(lambda: on_save_audio("mp3"))
+        self.save_wav_act.triggered.connect(lambda: on_save_audio("wav"))
+        self.save_srt_act.triggered.connect(on_save_srt)
+        self.save_btn.clicked.connect(self._show_save_menu)
 
-            self.cancel_btn = ctk.CTkButton(
-                btn_row, text="✖  Cancel", font=FONTS["button"],
-                fg_color="#CC0000", hover_color=COLORS["error"],
-                corner_radius=10, height=btn_height, width=100, command=on_cancel, state="disabled")
-            self.cancel_btn.pack(side="left", padx=6)
+        self.open_folder_btn = theme.button("📂  Folder", theme.ROLE_GHOST,
+                                            tip="Open the folder of the last saved file, or the save folder")
+        _fix_width(self.open_folder_btn)
+        self.open_folder_btn.clicked.connect(on_open_folder)
 
-            self.play_btn = ctk.CTkButton(
-                btn_row, text="▶  Play", font=FONTS["button"],
-                fg_color=COLORS["bg_input"], hover_color=COLORS["accent_primary"],
-                border_color=COLORS["accent_primary"], border_width=2,
-                corner_radius=10, height=btn_height, width=play_width, command=on_play, state="disabled")
-            self.play_btn.pack(side="left", padx=6)
+        row2.addWidget(self.play_btn, 1)
+        row2.addWidget(self.save_btn, 1)
+        row2.addWidget(self.open_folder_btn)
+        self.open_folder_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.open_folder_btn.setFixedWidth(self.open_folder_btn.minimumWidth())
+        lay.addLayout(row2)
 
-            self.stop_btn = ctk.CTkButton(
-                btn_row, text="⏹  Stop", font=FONTS["button"],
-                fg_color=COLORS["bg_input"], hover_color=COLORS["error"],
-                border_color=COLORS["error"], border_width=2,
-                corner_radius=10, height=btn_height, width=stop_width, command=on_stop, state="disabled")
-            self.stop_btn.pack(side="left", padx=6)
+        self.play_btn.setEnabled(False)
+        self.set_outputs(mp3=False, wav=False, srt=False)
 
-            self.save_btn = ctk.CTkButton(
-                btn_row, text="💾  Save MP3", font=FONTS["button"],
-                fg_color=COLORS["success"], hover_color="#00B87A",
-                text_color=COLORS["bg_dark"],
-                corner_radius=10, height=btn_height, width=save_width, command=on_save, state="disabled")
-            self.save_btn.pack(side="left", padx=6)
+    # ── clicks ─────────────────────────────────────────────────────
+    def _main_clicked(self):
+        (self._on_cancel if self._generating else self._on_generate)()
 
-            self.save_srt_btn = ctk.CTkButton(
-                btn_row, text="📄  Save SRT", font=FONTS["button"],
-                fg_color="#3498DB", hover_color="#2980B9",
-                text_color="#FFFFFF",
-                corner_radius=10, height=btn_height, width=srt_width, command=on_save_srt, state="disabled")
-            self.save_srt_btn.pack(side="left", padx=6)
+    def _play_clicked(self):
+        (self._on_stop if self._playing else self._on_play)()
 
-            self.open_folder_btn = ctk.CTkButton(
-                btn_row, text="📂  Open Folder", font=FONTS["button"],
-                fg_color=COLORS["bg_card"], hover_color=COLORS["accent_secondary"],
-                border_color=COLORS["border"], border_width=1,
-                text_color=COLORS["text_primary"],
-                corner_radius=10, height=btn_height, width=folder_width,
-                command=on_open_folder, state="disabled")
-            self.open_folder_btn.pack(side="left", padx=(6, 0))
-        else:
-            row1 = ctk.CTkFrame(frame, fg_color="transparent")
-            row1.pack(fill="x", padx=16, pady=(0, 6))
+    def _show_save_menu(self):
+        self.save_menu.setMinimumWidth(self.save_btn.width())
+        self.save_menu.exec(self.save_btn.mapToGlobal(QPoint(0, self.save_btn.height() + 2)))
 
-            self.generate_btn = ctk.CTkButton(
-                row1, text="⚡  Generate Speech", font=FONTS["button"],
-                fg_color=COLORS["accent_primary"], hover_color=COLORS["accent_secondary"],
-                corner_radius=10, height=btn_height, command=on_generate)
-            self.generate_btn.pack(side="left", expand=True, fill="x")
+    # ── states ─────────────────────────────────────────────────────
+    def set_loading(self, loading: bool):
+        """Before the engines are ready: Generate and Preview wait."""
+        self._loading = loading
+        if self._generating:
+            return
+        self.generate_btn.setText(LOADING_TEXT if loading else GENERATE_TEXT)
+        self.generate_btn.setEnabled(not loading)
+        if self.preview_btn is not None:
+            self.preview_btn.setEnabled(not loading)
 
-            self.preview_btn = None
-            if on_preview is not None:
-                self.preview_btn = ctk.CTkButton(
-                    row1, text="🎧  Preview", font=FONTS["button"],
-                    fg_color=COLORS["bg_input"], hover_color=COLORS["accent_secondary"],
-                    border_color=COLORS["accent_secondary"], border_width=2,
-                    corner_radius=10, height=btn_height, width=110, command=on_preview)
-                self.preview_btn.pack(side="left", padx=(6, 0))
-
-            row2 = ctk.CTkFrame(frame, fg_color="transparent")
-            row2.pack(fill="x", padx=16, pady=(0, 14))
-            # "uniform" keeps the 3:3:4:4:3:3 column ratio fixed so a button
-            # text change (e.g. "Play" -> "Playing…") can't resize siblings.
-            row2.columnconfigure((0, 1, 4, 5), weight=3, uniform="btn")
-            row2.columnconfigure((2, 3), weight=4, uniform="btn")
-
-            self.play_btn = ctk.CTkButton(
-                row2, text="▶  Play", font=FONTS["button"],
-                fg_color=COLORS["bg_input"], hover_color=COLORS["accent_primary"],
-                border_color=COLORS["accent_primary"], border_width=2,
-                corner_radius=10, height=btn_height, width=0, command=on_play, state="disabled")
-            self.play_btn.grid(row=0, column=0, padx=2, sticky="ew")
-
-            self.stop_btn = ctk.CTkButton(
-                row2, text="⏹  Stop", font=FONTS["button"],
-                fg_color=COLORS["bg_input"], hover_color=COLORS["error"],
-                border_color=COLORS["error"], border_width=2,
-                corner_radius=10, height=btn_height, width=0, command=on_stop, state="disabled")
-            self.stop_btn.grid(row=0, column=1, padx=2, sticky="ew")
-
-            self.save_btn = ctk.CTkButton(
-                row2, text="💾  Save MP3", font=FONTS["button"],
-                fg_color=COLORS["success"], hover_color="#00B87A",
-                text_color=COLORS["bg_dark"],
-                corner_radius=10, height=btn_height, width=0, command=on_save, state="disabled")
-            self.save_btn.grid(row=0, column=2, padx=2, sticky="ew")
-
-            self.save_srt_btn = ctk.CTkButton(
-                row2, text="📄  Save SRT", font=FONTS["button"],
-                fg_color="#3498DB", hover_color="#2980B9",
-                text_color="#FFFFFF",
-                corner_radius=10, height=btn_height, width=0, command=on_save_srt, state="disabled")
-            self.save_srt_btn.grid(row=0, column=3, padx=2, sticky="ew")
-
-            self.open_folder_btn = ctk.CTkButton(
-                row2, text="📂  Folder", font=FONTS["button"],
-                fg_color=COLORS["bg_card"], hover_color=COLORS["accent_secondary"],
-                border_color=COLORS["border"], border_width=1,
-                text_color=COLORS["text_primary"],
-                corner_radius=10, height=btn_height, width=0,
-                command=on_open_folder, state="disabled")
-            self.open_folder_btn.grid(row=0, column=4, padx=2, sticky="ew")
-
-            self.cancel_btn = ctk.CTkButton(
-                row2, text="✖  Cancel", font=FONTS["button"],
-                fg_color="#CC0000", hover_color=COLORS["error"],
-                corner_radius=10, height=btn_height, width=0, command=on_cancel, state="disabled")
-            self.cancel_btn.grid(row=0, column=5, padx=2, sticky="ew")
-
-    def set_generating(self, is_generating: bool):
-        """Toggle Cancel button state during generation."""
+    def set_generating(self, is_generating: bool, preview=False):
+        """Generate becomes Cancel (with the progress inside) while a run is on."""
+        self._generating = is_generating
+        self._preview = preview
+        btn = self.generate_btn
         if is_generating:
-            self.cancel_btn.configure(state="normal", text="✖  Cancel")
+            _set_role(btn, theme.ROLE_STOP)
+            btn.set_fill_color(COLORS["error"], 70)
+            btn.set_progress(0)
+            btn.setEnabled(True)
+            self._cancel_text(0)
+            self.set_playing(False)
+            for b in (self.play_btn, self.save_btn, self.preview_btn):
+                if b is not None:
+                    b.setEnabled(False)
         else:
-            self.cancel_btn.configure(state="disabled", text="✖  Cancel")
+            _set_role(btn, theme.ROLE_PRIMARY)
+            btn.set_progress(None)
+            btn.setText(LOADING_TEXT if self._loading else GENERATE_TEXT)
+            btn.setEnabled(not self._loading)
+            if self.preview_btn is not None:
+                self.preview_btn.setEnabled(not self._loading)
+
+    def _cancel_text(self, frac):
+        what = "Cancel preview" if self._preview else "Cancel"
+        self.generate_btn.setText(f"✖  {what}  {round(frac * 100)}%")
+
+    def set_cancelling(self):
+        self.generate_btn.setText("⌛  Cancelling…")
+        self.generate_btn.setEnabled(False)
+
+    def set_progress(self, frac):
+        """Generation progress, 0 to 1, shown inside the Cancel button."""
+        if not self._generating or not self.generate_btn.isEnabled():
+            return
+        frac = max(0.0, min(1.0, float(frac)))
+        self.generate_btn.set_progress(frac)
+        self._cancel_text(frac)
+
+    def set_playing(self, playing: bool):
+        """Play ↔ Stop. The playback position fills the button while it plays."""
+        self._playing = playing
+        btn = self.play_btn
+        _set_role(btn, theme.ROLE_STOP if playing else theme.ROLE_OUTLINE)
+        btn.setText(STOP_TEXT if playing else PLAY_TEXT)
+        btn.set_fill_color(COLORS["error"] if playing else COLORS["accent_primary"], 70)
+        btn.set_progress(0 if playing else None)
+
+    def set_play_progress(self, frac):
+        if self._playing:
+            self.play_btn.set_progress(frac)
+
+    def set_outputs(self, mp3, wav, srt):
+        """Which Save menu items have something to save."""
+        self.save_mp3_act.setEnabled(bool(mp3))
+        self.save_wav_act.setEnabled(bool(wav))
+        self.save_srt_act.setEnabled(bool(srt))
+        self.save_btn.setEnabled(bool(mp3 or wav or srt))

@@ -71,6 +71,9 @@ class VoiceProfile:
     base_f0_hz: float = None
     target_f0_hz: float = None
     imported: bool = False
+    # Words the saved preview speaks (about 10 s of the clip's own transcript, from
+    # voice match); None uses previews.TEXT. See core/voice_cloning/previews.py.
+    preview_text: str = None
     error: str = None
     schema: int = SCHEMA
 
@@ -181,7 +184,8 @@ def list_voices(ready_only=False) -> list:
 def update_params(slug, **changes) -> VoiceProfile:
     allowed = {"name", "pitch", "index_rate", "protect", "diffusion_steps", "status", "error",
                "pth", "index", "sample_rate", "epochs", "batch_size", "reference_wav",
-               "base_f0_hz", "target_f0_hz", "base_engine", "base_voice", "base_selection", "prep"}
+               "base_f0_hz", "target_f0_hz", "base_engine", "base_voice", "base_selection", "prep",
+               "preview_text"}
     bad = set(changes) - allowed
     if bad:
         raise ValueError(f"Cannot update {sorted(bad)}")
@@ -197,11 +201,13 @@ def delete_voice(slug) -> None:
     """Remove the voice folder and any training leftovers in Applio/logs/<slug>.
 
     A cancelled or failed training run leaves its sliced audio and up to
-    1.3 GB of G_/D_ checkpoints there.
+    1.3 GB of G_/D_ checkpoints there. The voice's saved preview goes too.
     """
+    from core.voice_cloning import previews
     with _lock:
         shutil.rmtree(runtime.voices_dir() / slug, ignore_errors=True)
         shutil.rmtree(runtime.repo_dir("rvc") / "logs" / slug, ignore_errors=True)
+        previews.delete(slug)
 
 
 # ── creation ────────────────────────────────────────────────────────

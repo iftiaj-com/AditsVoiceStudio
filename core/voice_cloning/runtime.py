@@ -89,17 +89,40 @@ _manifest_lock = threading.Lock()
 
 # ── settings and paths ──────────────────────────────────────────────
 
+# runtime_root() is called for every path of every voice (422 times to list
+# 134 voices), and each call used to create two folders and re-read the
+# settings file: 0.7 s at start and 1.3 s per library refresh, on the GUI
+# thread. The settings are now re-read only when the file's mtime changes,
+# and a found default root is kept.
+_settings_path = None
+_settings_cache = (None, {})            # (mtime_ns or None, data)
+_default_root = None
+
+
 def settings_path() -> Path:
-    return paths.user_dir("settings") / "clone_voice.json"
+    global _settings_path
+    if _settings_path is None:
+        _settings_path = paths.user_dir("settings") / "clone_voice.json"
+    return _settings_path
 
 
 def load_settings() -> dict:
+    global _settings_cache
+    path = settings_path()
     try:
-        with open(settings_path(), "r", encoding="utf-8") as f:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        return {}
+    if _settings_cache[0] == mtime:
+        return dict(_settings_cache[1])
+    try:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        data = data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+    _settings_cache = (mtime, data)
+    return dict(data)
 
 
 def save_settings(data: dict) -> None:
@@ -107,6 +130,9 @@ def save_settings(data: dict) -> None:
 
 
 def default_root() -> Path:
+    global _default_root
+    if _default_root is not None and (_default_root / "runtime.json").is_file():
+        return _default_root
     candidates = []
     if paths.FROZEN:
         exe_dir = Path(sys.executable).parent
@@ -120,6 +146,7 @@ def default_root() -> Path:
 
     for c in candidates:
         if c.is_dir() and (c / "runtime.json").is_file():
+            _default_root = c
             return c
 
     if paths.FROZEN:

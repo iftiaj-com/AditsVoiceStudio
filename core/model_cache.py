@@ -6,7 +6,7 @@ Thread-safe, idle-expiring cache for heavy TTS / ASR models.
 Engines register a model under a key with a factory; repeated synthesis
 requests reuse the loaded instance instead of paying multi-second load
 times on every click. A background sweeper evicts entries that have been
-idle longer than `ttl_seconds` (default 5 minutes) so RAM/VRAM is
+idle longer than `ttl_seconds` (the app uses 20 minutes) so RAM/VRAM is
 released when the user walks away.
 
 Usage:
@@ -26,8 +26,9 @@ def _release_accelerator_memory():
     """Return CUDA memory to the OS after evicting models (no-op without torch)."""
     gc.collect()
     try:
-        import torch
-        if torch.cuda.is_available():
+        import sys
+        torch = sys.modules.get("torch")    # nothing to free if no model loaded torch
+        if torch is not None and torch.cuda.is_available():
             torch.cuda.empty_cache()
     except Exception:
         pass
@@ -103,4 +104,6 @@ class ModelCache:
 
 
 # Single shared cache for the whole app.
-MODEL_CACHE = ModelCache(ttl_seconds=300.0)
+# 20 minutes: with 5 a short break meant MeloTTS reloading (about 49 s cold)
+# and Whisper (about 7 s). RVC training frees the cache first (Synthesizer.release_gpu).
+MODEL_CACHE = ModelCache(ttl_seconds=1200.0)

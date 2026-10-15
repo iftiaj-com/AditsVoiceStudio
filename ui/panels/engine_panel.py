@@ -1,471 +1,299 @@
 """
 ui/panels/engine_panel.py
-──────────────────────────
-TTS engine selector card with per-engine option sub-frames.
-"""
-import customtkinter as ctk
-import torch
+────────────────────────────
+TTS engine card (Qt): engine dropdown, GPU switch, and one options box per
+engine, shown for the selected engine only.
 
-from core.constants import (COLORS, FONTS, GTTS_LANGUAGES, EDGE_VOICES, KOKORO_LANGS, KOKORO_VOICES, 
-                            PIPER_VOICES, MELO_VOICES)
-from ui.theme import card, styled_option_menu, styled_slider
+Same public methods as ui/panels/engine_panel.py (get_settings,
+get_voice_selection, apply_voice_selection, settings_for_selection,
+engine_names, voice_choices, plus the static helpers), so the generation
+code and the Clone Voice code can use either. The selection rules live in
+core.voice_selection.
+"""
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QComboBox, QFrame, QGridLayout, QHBoxLayout, QSizePolicy, QWidget
+
+from core import voice_selection
+from core.gpu import cuda_available
+from core.constants import (COLORS, EDGE_VOICES, GTTS_LANGUAGES, KOKORO_LANGS, KOKORO_VOICES,
+                            MELO_VOICES, PIPER_VOICES)
+from ui import theme
+from ui.widgets import ToggleSwitch, ValueSlider
+
+MENU_W = 280            # CTk option menus are 280 px (gTTS 250)
+
+
+def _combo(values, current=None, width=MENU_W):
+    cb = QComboBox()
+    cb.addItems(list(values))
+    if current is not None:
+        cb.setCurrentText(current)
+    cb.setFixedWidth(width)
+    cb.setMaxVisibleItems(15)
+    return cb
 
 
 class EnginePanel:
-    """
-    Builds the engine selector card and all per-engine option sub-frames.
-    Exposes get_settings() so the generation pipeline can read current values.
-    """
+    SPEED_RANGES = voice_selection.SPEED_RANGES
+    engine_kind = staticmethod(voice_selection.engine_kind)
+    describe_selection = staticmethod(voice_selection.describe_selection)
+    format_speed = staticmethod(voice_selection.format_speed)
+    synthesis_key = staticmethod(voice_selection.synthesis_key)
 
-    def __init__(self, parent, available_engines: list, system_voices: list, row=None):
-        if row is not None:
-            self._frame = card(parent, row, "🔊  TTS Engine")
-        else:
-            self._frame = ctk.CTkFrame(
-                parent, fg_color=COLORS["bg_card"],
-                corner_radius=14, border_width=1, border_color=COLORS["border"]
-            )
-            self._frame.pack(fill="x", padx=16, pady=6)
-            
-            ctk.CTkLabel(
-                self._frame, text="🔊  TTS Engine",
-                font=FONTS["subtitle"],
-                text_color=COLORS["text_primary"],
-            ).pack(anchor="w", padx=16, pady=(14, 10))
+    def __init__(self, available_engines: list, system_voices: list):
+        self.frame, lay = theme.card("🔊  TTS Engine")
         self._system_voices = system_voices
 
-        # ── Engine selector, GPU toggle on the right edge of the same row ──
-        # The dropdown stretches between the label and the toggle, so the row
-        # also fits the narrowest window (500 px column).
-        engine_row = ctk.CTkFrame(self._frame, fg_color="transparent")
-        engine_row.pack(fill="x", padx=16, pady=(0, 10))
-        engine_row.columnconfigure(1, weight=1)
+        # Engine row: label, dropdown stretching, GPU switch on the right.
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(theme.label("Engine", secondary=True))
+        self._engine_names = [e.name for e in available_engines] or ["No TTS engines available"]
+        from core.defaults import default_engine_name
+        self._engine_menu = QComboBox()
+        self._engine_menu.addItems(self._engine_names)
+        self._engine_menu.setCurrentText(default_engine_name(self._engine_names))
+        self._engine_menu.setMinimumWidth(160)
+        self._engine_menu.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row.addWidget(self._engine_menu, 1)
+        row.addSpacing(6)
+        self._gpu = ToggleSwitch("GPU Acceleration (PyTorch)", cuda_available(),
+                                 on_color=COLORS["success"])
+        self._gpu.setFont(theme.font("body_small"))
+        self._gpu.set_text_color(COLORS["text_secondary"])
+        row.addWidget(self._gpu)
+        lay.addLayout(row)
 
-        engine_names = [e.name for e in available_engines] or ["No TTS engines available"]
+        self._sub = {}                  # kind -> options box
+        self._build_gtts(lay)
+        self._build_edge(lay)
+        self._build_kokoro(lay)
+        self._build_piper(lay)
+        self._build_melo(lay)
+        self._build_pyttsx3(lay)
+        self._engine_menu.currentTextChanged.connect(self._on_engine_change)
+        self._on_engine_change(self._engine_menu.currentText())
 
-        ctk.CTkLabel(engine_row, text="Engine", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(row=0, column=0, sticky="w", padx=(0, 10))
+    # ── options boxes ──────────────────────────────────────────────
+    def _box(self, lay, kind):
+        frame = QFrame()
+        frame.setObjectName("inset")
+        g = QGridLayout(frame)
+        g.setContentsMargins(14, 10, 14, 10)
+        g.setHorizontalSpacing(12)
+        g.setVerticalSpacing(8)
+        g.setColumnStretch(1, 1)
+        frame.hide()
+        lay.addWidget(frame)
+        self._sub[kind] = frame
+        return g
 
-        # Default to Kokoro if present
-        default_val = engine_names[0]
-        for n in engine_names:
-            if "Kokoro" in n:
-                default_val = n
-                break
+    @staticmethod
+    def _row(g, r, text, widget):
+        g.addWidget(theme.label(text, secondary=True), r, 0)
+        g.addWidget(widget, r, 1, Qt.AlignRight)
 
-        self.engine_var = ctk.StringVar(value=default_val)
-        self._engine_menu = ctk.CTkOptionMenu(
-            engine_row, variable=self.engine_var, values=engine_names,
-            font=FONTS["body"], fg_color=COLORS["bg_input"],
-            button_color=COLORS["accent_primary"],
-            button_hover_color=COLORS["accent_secondary"],
-            dropdown_fg_color=COLORS["bg_card"],
-            dropdown_hover_color=COLORS["accent_primary"],
-            corner_radius=8, width=160,
-            command=self._on_engine_change,
-        )
-        self._engine_menu.grid(row=0, column=1, sticky="ew")
+    @staticmethod
+    def _slider_row(slider, label, reset=None):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        h.addWidget(slider)
+        h.addWidget(label)
+        if reset is not None:
+            h.addWidget(reset)
+        return w
 
-        self.gpu_var = ctk.BooleanVar(value=torch.cuda.is_available())
-        ctk.CTkSwitch(
-            engine_row, text="GPU Acceleration (PyTorch)", variable=self.gpu_var,
-            font=FONTS["body_small"], text_color=COLORS["text_secondary"],
-            onvalue=True, offvalue=False,
-            button_color=COLORS["accent_primary"],
-            button_hover_color=COLORS["accent_secondary"],
-            progress_color=COLORS["success"],
-            fg_color=COLORS["switch_off"],
-        ).grid(row=0, column=2, sticky="e", padx=(16, 0))
+    @staticmethod
+    def _value_label(text, width):
+        lab = theme.label(text, muted=True, small=True)
+        lab.setFixedWidth(width)
+        return lab
 
-        # ── Per-engine sub-frames ──────────────────────────────────
-        self._sub_frames: dict[str, ctk.CTkFrame] = {}
-        self._build_gtts_frame()
-        self._build_edge_frame()
-        self._build_kokoro_frame()
-        self._build_piper_frame()
-        self._build_melo_frame()
-        self._build_pyttsx3_frame(system_voices)
+    def _reset_button(self, slider, label, value, text):
+        b = theme.button("↺ 1x", theme.ROLE_GHOST, small=True)
+        b.setFixedWidth(46)
 
-        # Show the default engine frame after a short delay
-        self._frame.after(50, lambda: self._on_engine_change(self.engine_var.get()))
+        def reset():
+            slider.set_value(value)
+            label.setText(text)
+        b.clicked.connect(reset)
+        return b
 
-    # ── Sub-frame builders ─────────────────────────────────────────
+    def _build_gtts(self, lay):
+        g = self._box(lay, "gtts")
+        self._gtts_lang = _combo(GTTS_LANGUAGES, "English (US)", width=250)
+        self._row(g, 0, "Language / Accent", self._gtts_lang)
 
-    def _sub_inner(self, key: str) -> ctk.CTkFrame:
-        outer = ctk.CTkFrame(self._frame, fg_color="transparent")
-        self._sub_frames[key] = outer
-        inner = ctk.CTkFrame(outer, fg_color=COLORS["bg_input"],
-                             corner_radius=10, border_width=1,
-                             border_color=COLORS["border"])
-        inner.pack(fill="x")
-        inner.columnconfigure(1, weight=1)
-        return inner
+    def _build_edge(self, lay):
+        g = self._box(lay, "edge")
+        self._edge_voice = _combo(EDGE_VOICES)
+        self._row(g, 0, "Neural Voice", self._edge_voice)
+        self._edge_rate = ValueSlider(-50, 50, 0, step=1, width=200)
+        self._edge_rate_lbl = self._value_label("+0%", 45)
+        self._edge_rate.valueChangedF.connect(lambda v: self._edge_rate_lbl.setText(f"{int(v):+d}%"))
+        self._row(g, 1, "Speed (+/- %)", self._slider_row(self._edge_rate, self._edge_rate_lbl))
 
-    def _build_gtts_frame(self):
-        inner = self._sub_inner("gtts")
-        ctk.CTkLabel(inner, text="Language / Accent", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=0, column=0, padx=14, pady=12, sticky="w")
-        self.gtts_lang_var = ctk.StringVar(value="English (US)")
-        styled_option_menu(inner, self.gtts_lang_var,
-                           list(GTTS_LANGUAGES.keys()), width=250).grid(
-            row=0, column=1, padx=14, pady=12, sticky="e")
-
-    def _build_edge_frame(self):
-        inner = self._sub_inner("edge")
-        ctk.CTkLabel(inner, text="Neural Voice", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=0, column=0, padx=14, pady=(12, 6), sticky="w")
-        self.edge_voice_var = ctk.StringVar(value=list(EDGE_VOICES.keys())[0])
-        styled_option_menu(inner, self.edge_voice_var,
-                           list(EDGE_VOICES.keys()), width=280).grid(
-            row=0, column=1, padx=14, pady=(12, 6), sticky="e")
-
-        ctk.CTkLabel(inner, text="Speed (+/- %)", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=1, column=0, padx=14, pady=6, sticky="w")
-        rate_row = ctk.CTkFrame(inner, fg_color="transparent")
-        rate_row.grid(row=1, column=1, padx=14, pady=6, sticky="e")
-        self.edge_rate_var = ctk.IntVar(value=0)
-        self._edge_rate_lbl = ctk.CTkLabel(rate_row, text="+0%",
-                                           font=FONTS["body_small"],
-                                           text_color=COLORS["text_muted"], width=45)
-        styled_slider(rate_row, self.edge_rate_var, -50, 50, width=200,
-                      command=lambda v: self._edge_rate_lbl.configure(
-                          text=f"{int(v):+d}%")).pack(side="left", padx=(0, 8))
-        self._edge_rate_lbl.pack(side="left")
-
-    def _build_kokoro_frame(self):
-        inner = self._sub_inner("kokoro")
-        inner.columnconfigure(1, weight=1)
-
-        # Language selection
-        ctk.CTkLabel(inner, text="Language", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=0, column=0, padx=14, pady=(12, 6), sticky="w")
-        
-        self.kokoro_lang_var = ctk.StringVar(value="American English")
-        self._kokoro_lang_menu = styled_option_menu(
-            inner, self.kokoro_lang_var, list(KOKORO_LANGS.keys()), width=280,
-            command=self._update_kokoro_voices
-        )
-        self._kokoro_lang_menu.grid(row=0, column=1, padx=14, pady=(12, 6), sticky="e")
-
-        # Voice selection
-        ctk.CTkLabel(inner, text="Voice", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=1, column=0, padx=14, pady=6, sticky="w")
-        
-        self.kokoro_voice_var = ctk.StringVar()
-        self._kokoro_voice_menu = styled_option_menu(inner, self.kokoro_voice_var, [], width=280)
-        self._kokoro_voice_menu.grid(row=1, column=1, padx=14, pady=6, sticky="e")
-        
-        # Initial voice list update
+    def _build_kokoro(self, lay):
+        g = self._box(lay, "kokoro")
+        self._kokoro_lang = _combo(KOKORO_LANGS, "American English")
+        self._row(g, 0, "Language", self._kokoro_lang)
+        self._kokoro_voice = _combo([])
+        self._row(g, 1, "Voice", self._kokoro_voice)
         self._update_kokoro_voices("American English")
-
-        # Speed slider
-        ctk.CTkLabel(inner, text="Speed (0.5x - 2x)", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=2, column=0, padx=14, pady=(6, 12), sticky="w")
-        
-        speed_row = ctk.CTkFrame(inner, fg_color="transparent")
-        speed_row.grid(row=2, column=1, padx=14, pady=(6, 12), sticky="e")
-        self.kokoro_speed_var = ctk.DoubleVar(value=1.0)
-        self._kokoro_speed_lbl = ctk.CTkLabel(speed_row, text="1.0x",
-                                            font=FONTS["body_small"],
-                                            text_color=COLORS["text_muted"], width=45)
-        styled_slider(speed_row, self.kokoro_speed_var, 0.5, 2.0, width=150,
-                      command=lambda v: self._kokoro_speed_lbl.configure(
-                          text=f"{float(v):.1f}x")).pack(side="left", padx=(0, 4))
-        self._kokoro_speed_lbl.pack(side="left", padx=(0, 4))
-
-        def _reset_kokoro_speed():
-            self.kokoro_speed_var.set(1.0)
-            self._kokoro_speed_lbl.configure(text="1.0x")
-
-        ctk.CTkButton(
-            speed_row, text="↺ 1x", font=FONTS["body_small"],
-            fg_color=COLORS["bg_input"],
-            hover_color=COLORS["accent_primary"],
-            border_color=COLORS["border"], border_width=1,
-            corner_radius=6, height=24, width=46,
-            command=_reset_kokoro_speed,
-        ).pack(side="left")
-
-
+        self._kokoro_lang.currentTextChanged.connect(self._update_kokoro_voices)
+        self._kokoro_speed = ValueSlider(0.5, 2.0, 1.0, step=0.01, width=150)
+        self._kokoro_speed_lbl = self._value_label("1.0x", 45)
+        self._kokoro_speed.valueChangedF.connect(lambda v: self._kokoro_speed_lbl.setText(f"{v:.1f}x"))
+        reset = self._reset_button(self._kokoro_speed, self._kokoro_speed_lbl, 1.0, "1.0x")
+        self._row(g, 2, "Speed (0.5x - 2x)", self._slider_row(self._kokoro_speed, self._kokoro_speed_lbl, reset))
 
     def _update_kokoro_voices(self, lang_name):
-        lang_code = KOKORO_LANGS[lang_name]
-        voices = list(KOKORO_VOICES[lang_code].keys())
-        self._kokoro_voice_menu.configure(values=voices)
-        self.kokoro_voice_var.set(voices[0])
+        voices = list(KOKORO_VOICES[KOKORO_LANGS[lang_name]].keys())
+        self._kokoro_voice.blockSignals(True)
+        self._kokoro_voice.clear()
+        self._kokoro_voice.addItems(voices)
+        self._kokoro_voice.setCurrentIndex(0)
+        self._kokoro_voice.blockSignals(False)
 
-    def _build_piper_frame(self):
-        inner = self._sub_inner("piper")
-        ctk.CTkLabel(inner, text="Voice", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=0, column=0, padx=14, pady=12, sticky="w")
-        self.piper_voice_var = ctk.StringVar(value=list(PIPER_VOICES.keys())[0])
-        styled_option_menu(inner, self.piper_voice_var,
-                           list(PIPER_VOICES.keys()), width=280).grid(
-            row=0, column=1, padx=14, pady=12, sticky="e")
+    def _build_piper(self, lay):
+        g = self._box(lay, "piper")
+        self._piper_voice = _combo(PIPER_VOICES)
+        self._row(g, 0, "Voice", self._piper_voice)
 
-    def _build_melo_frame(self):
-        inner = self._sub_inner("melo")
-        ctk.CTkLabel(inner, text="Language / Accent", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=0, column=0, padx=14, pady=(12, 6), sticky="w")
-        self.melo_voice_var = ctk.StringVar(value=list(MELO_VOICES.keys())[0])
-        styled_option_menu(inner, self.melo_voice_var,
-                           list(MELO_VOICES.keys()), width=280).grid(
-            row=0, column=1, padx=14, pady=(12, 6), sticky="e")
+    def _build_melo(self, lay):
+        g = self._box(lay, "melo")
+        self._melo_voice = _combo(MELO_VOICES)
+        self._row(g, 0, "Language / Accent", self._melo_voice)
+        self._melo_speed = ValueSlider(0.5, 2.0, 1.0, step=0.01, width=150)
+        self._melo_speed_lbl = self._value_label("1.0x", 45)
+        self._melo_speed.valueChangedF.connect(lambda v: self._melo_speed_lbl.setText(f"{v:.1f}x"))
+        reset = self._reset_button(self._melo_speed, self._melo_speed_lbl, 1.0, "1.0x")
+        self._row(g, 1, "Speed (0.5x - 2x)", self._slider_row(self._melo_speed, self._melo_speed_lbl, reset))
 
-        ctk.CTkLabel(inner, text="Speed (0.5x - 2x)", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=1, column=0, padx=14, pady=6, sticky="w")
-        
-        speed_row = ctk.CTkFrame(inner, fg_color="transparent")
-        speed_row.grid(row=1, column=1, padx=14, pady=(6, 12), sticky="e")
-        self.melo_speed_var = ctk.DoubleVar(value=1.0)
-        self._melo_speed_lbl = ctk.CTkLabel(speed_row, text="1.0x",
-                                            font=FONTS["body_small"],
-                                            text_color=COLORS["text_muted"], width=45)
-        styled_slider(speed_row, self.melo_speed_var, 0.5, 2.0, width=150,
-                      command=lambda v: self._melo_speed_lbl.configure(
-                          text=f"{float(v):.1f}x")).pack(side="left", padx=(0, 4))
-        self._melo_speed_lbl.pack(side="left", padx=(0, 4))
-
-        def _reset_melo_speed():
-            self.melo_speed_var.set(1.0)
-            self._melo_speed_lbl.configure(text="1.0x")
-
-        ctk.CTkButton(
-            speed_row, text="↺ 1x", font=FONTS["body_small"],
-            fg_color=COLORS["bg_input"],
-            hover_color=COLORS["accent_primary"],
-            border_color=COLORS["border"], border_width=1,
-            corner_radius=6, height=24, width=46,
-            command=_reset_melo_speed,
-        ).pack(side="left")
-
-    def _build_pyttsx3_frame(self, system_voices):
-        inner = self._sub_inner("pyttsx3")
-        inner.columnconfigure(1, weight=1)
-        voice_names = [v[0] for v in system_voices] if system_voices else ["Default"]
-
-        ctk.CTkLabel(inner, text="Voice", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=0, column=0, padx=14, pady=(12, 6), sticky="w")
-        self.pyttsx3_voice_var = ctk.StringVar(value=voice_names[0])
-        styled_option_menu(inner, self.pyttsx3_voice_var,
-                           voice_names, width=280).grid(
-            row=0, column=1, padx=14, pady=(12, 6), sticky="e")
-
-        ctk.CTkLabel(inner, text="Speed (WPM)", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=1, column=0, padx=14, pady=6, sticky="w")
-        rate_row = ctk.CTkFrame(inner, fg_color="transparent")
-        rate_row.grid(row=1, column=1, padx=14, pady=6, sticky="e")
-        self.rate_var = ctk.IntVar(value=175)
-        self._rate_lbl = ctk.CTkLabel(rate_row, text="175 WPM",
-                                      font=FONTS["body_small"],
-                                      text_color=COLORS["text_muted"], width=65)
-        styled_slider(rate_row, self.rate_var, 50, 350, width=200,
-                      command=lambda v: self._rate_lbl.configure(
-                          text=f"{int(v)} WPM")).pack(side="left", padx=(0, 8))
-        self._rate_lbl.pack(side="left")
-
-        ctk.CTkLabel(inner, text="Volume", font=FONTS["body"],
-                     text_color=COLORS["text_secondary"]).grid(
-            row=2, column=0, padx=14, pady=(6, 12), sticky="w")
-        vol_row = ctk.CTkFrame(inner, fg_color="transparent")
-        vol_row.grid(row=2, column=1, padx=14, pady=(6, 12), sticky="e")
-        self.volume_var = ctk.DoubleVar(value=0.9)
-        self._vol_lbl = ctk.CTkLabel(vol_row, text="90%",
-                                     font=FONTS["body_small"],
-                                     text_color=COLORS["text_muted"], width=45)
-        styled_slider(vol_row, self.volume_var, 0.0, 1.0, width=200,
-                      command=lambda v: self._vol_lbl.configure(
-                          text=f"{int(float(v)*100)}%")).pack(side="left", padx=(0, 8))
-        self._vol_lbl.pack(side="left")
-
-    # ── Engine change handler ──────────────────────────────────────
+    def _build_pyttsx3(self, lay):
+        g = self._box(lay, "pyttsx3")
+        names = [v[0] for v in self._system_voices] if self._system_voices else ["Default"]
+        self._pyttsx3_voice = _combo(names)
+        self._row(g, 0, "Voice", self._pyttsx3_voice)
+        self._rate = ValueSlider(50, 350, 175, step=1, width=200)
+        self._rate_lbl = self._value_label("175 WPM", 65)
+        self._rate.valueChangedF.connect(lambda v: self._rate_lbl.setText(f"{int(v)} WPM"))
+        self._row(g, 1, "Speed (WPM)", self._slider_row(self._rate, self._rate_lbl))
+        self._volume = ValueSlider(0.0, 1.0, 0.9, step=0.01, width=200)
+        self._vol_lbl = self._value_label("90%", 45)
+        self._volume.valueChangedF.connect(lambda v: self._vol_lbl.setText(f"{int(v * 100)}%"))
+        self._row(g, 2, "Volume", self._slider_row(self._volume, self._vol_lbl))
 
     def _on_engine_change(self, selection: str):
-        """Hide all sub-frames then show the relevant one."""
-        for f in self._sub_frames.values():
-            f.pack_forget()
+        """Show only the options box of the selected engine."""
+        kind = self.engine_kind(selection)
+        for k, frame in self._sub.items():
+            frame.setVisible(k == kind)
 
-        # One entry per registered engine, keyed by a word from its display name.
-        key_map = {
-            "gTTS":    "gtts",
-            "Edge":    "edge",
-            "Kokoro":  "kokoro",
-            "Piper":   "piper",
-            "Melo":    "melo",
-            "pyttsx3": "pyttsx3",
-        }
-        for keyword, key in key_map.items():
-            if keyword in selection and key in self._sub_frames:
-                self._sub_frames[key].pack(fill="x", padx=16, pady=(0, 12))
-                break
+    def on_selection_change(self, callback):
+        """Call *callback()* when the engine, a voice, a language or the GPU switch changes."""
+        for cb in self.frame.findChildren(QComboBox):
+            cb.currentTextChanged.connect(lambda _t: callback())
+        self._gpu.toggled.connect(lambda _on: callback())
 
-    # ── Voice selection (used by cloned voices) ────────────────────
-    # A cloned voice sounds best when converted from the engine voice it was
-    # made with, so each voice stores the selection below and switching the
-    # voice on restores it. Values are the dropdown display strings.
+    # ── voice selection (used by cloned voices) ────────────────────
+    def engine_names(self) -> list:
+        """The engines offered in the Engine dropdown."""
+        return list(self._engine_names)
 
-    _KIND_BY_KEYWORD = {"gTTS": "gtts", "Edge": "edge", "Kokoro": "kokoro",
-                        "Piper": "piper", "Melo": "melo", "pyttsx3": "pyttsx3"}
+    def voice_choices(self, kind, lang=None) -> list:
+        return voice_selection.voice_choices(kind, self._system_voices, lang)
 
-    @classmethod
-    def engine_kind(cls, engine_name):
-        for keyword, kind in cls._KIND_BY_KEYWORD.items():
-            if keyword in (engine_name or ""):
-                return kind
-        return None
-
-    @classmethod
-    def describe_selection(cls, sel) -> str:
-        """'Kokoro-82M · am_onyx · 1.2x' for labels; '' when sel is empty."""
-        if not sel or not sel.get("engine"):
-            return ""
-        parts = [sel["engine"].split(" (")[0]]
-        if sel.get("voice"):
-            parts.append(str(sel["voice"]))
-        speed = sel.get("speed")
-        if speed is not None:
-            kind = sel.get("kind") or cls.engine_kind(sel["engine"])
-            parts.append(f"{int(speed):+d}%" if kind == "edge" else
-                         f"{int(speed)} WPM" if kind == "pyttsx3" else f"{float(speed):.1f}x")
-        return " · ".join(parts)
+    def _speed_control(self, kind):
+        """(slider, value label) of an engine kind's speed (None for Piper and gTTS)."""
+        return {"kokoro": (self._kokoro_speed, self._kokoro_speed_lbl),
+                "melo": (self._melo_speed, self._melo_speed_lbl),
+                "edge": (self._edge_rate, self._edge_rate_lbl),
+                "pyttsx3": (self._rate, self._rate_lbl)}.get(kind)
 
     def get_voice_selection(self) -> dict:
         """The engine and voice currently picked, as dropdown values."""
-        name = self.engine_var.get()
+        name = self._engine_menu.currentText()
         kind = self.engine_kind(name)
         sel = {"engine": name, "kind": kind}
         if kind == "kokoro":
-            sel.update(lang=self.kokoro_lang_var.get(), voice=self.kokoro_voice_var.get())
-        elif kind == "edge":
-            sel["voice"] = self.edge_voice_var.get()
-        elif kind == "piper":
-            sel["voice"] = self.piper_voice_var.get()
-        elif kind == "melo":
-            sel["voice"] = self.melo_voice_var.get()
-        elif kind == "pyttsx3":
-            sel["voice"] = self.pyttsx3_voice_var.get()
-        elif kind == "gtts":
-            sel["voice"] = self.gtts_lang_var.get()
-        speed = self._speed_var(kind)
-        if speed is not None:
-            sel["speed"] = round(float(speed.get()), 2)
+            sel.update(lang=self._kokoro_lang.currentText(), voice=self._kokoro_voice.currentText())
+        elif kind in ("edge", "piper", "melo", "pyttsx3", "gtts"):
+            sel["voice"] = self._voice_menu(kind).currentText()
+        ctl = self._speed_control(kind)
+        if ctl is not None:
+            sel["speed"] = round(float(ctl[0].value_f()), 2)
         return sel
 
-    def _speed_var(self, kind):
-        """The speed control of an engine kind (None for Piper and gTTS)."""
-        return {"kokoro": self.kokoro_speed_var, "melo": self.melo_speed_var,
-                "edge": self.edge_rate_var, "pyttsx3": self.rate_var}.get(kind)
+    def _voice_menu(self, kind):
+        return {"edge": self._edge_voice, "piper": self._piper_voice, "melo": self._melo_voice,
+                "pyttsx3": self._pyttsx3_voice, "gtts": self._gtts_lang}.get(kind)
 
     def _apply_speed(self, kind, value):
-        """Set an engine's speed control and its value label. Out-of-range values are clamped."""
-        var = self._speed_var(kind)
-        if var is None or value is None:
+        """Set an engine's speed control and its label. Out-of-range values are clamped."""
+        ctl = self._speed_control(kind)
+        if ctl is None or value is None:
             return
-        lo, hi, label, fmt = {
-            "kokoro":  (0.5, 2.0, self._kokoro_speed_lbl, lambda v: f"{v:.1f}x"),
-            "melo":    (0.5, 2.0, self._melo_speed_lbl, lambda v: f"{v:.1f}x"),
-            "edge":    (-50, 50, self._edge_rate_lbl, lambda v: f"{int(v):+d}%"),
-            "pyttsx3": (50, 350, self._rate_lbl, lambda v: f"{int(v)} WPM"),
-        }[kind]
+        lo, hi, _default = self.SPEED_RANGES[kind]
         v = max(lo, min(hi, float(value)))
-        var.set(int(round(v)) if isinstance(var, ctk.IntVar) else v)
-        label.configure(text=fmt(v))
+        ctl[0].set_value(v)
+        ctl[1].setText(self.format_speed(kind, v))
 
-    def _voice_options(self, kind) -> dict:
-        """{dropdown value: underlying value} for an engine kind."""
-        if kind == "edge":
-            return dict(EDGE_VOICES)
-        if kind == "piper":
-            return dict(PIPER_VOICES)
-        if kind == "melo":
-            return {k: v.get("speaker") for k, v in MELO_VOICES.items()}
-        if kind == "pyttsx3":
-            return {n: vid for n, vid in self._system_voices} or {"Default": ""}
-        if kind == "gtts":
-            return dict(GTTS_LANGUAGES)
-        return {}
+    def _resolve_selection(self, sel):
+        return voice_selection.resolve_selection(sel, self.engine_names(), self._system_voices)
 
     def apply_voice_selection(self, sel):
         """Select sel's engine and voice. Returns None on success, else why not.
 
-        Nothing changes unless the whole selection can be applied. A voice
-        may be given as the dropdown value or the underlying value (older
-        voices stored e.g. a Piper model key or a Melo speaker id).
+        Nothing changes unless the whole selection can be applied.
         """
-        if not sel or not sel.get("engine"):
-            return "no base voice is recorded"
-        engines = list(self._engine_menu.cget("values"))
-        kind = sel.get("kind") or self.engine_kind(sel["engine"])
-        name = sel["engine"] if sel["engine"] in engines else next(
-            (e for e in engines if kind and self.engine_kind(e) == kind), None)
-        if name is None:
-            return f"{sel['engine'].split(' (')[0]} is not available"
-        voice = sel.get("voice")
-
-        if kind == "kokoro":
-            lang = sel.get("lang")
-            if lang not in KOKORO_LANGS or voice not in KOKORO_VOICES[KOKORO_LANGS[lang]]:
-                lang = next((ln for ln, code in KOKORO_LANGS.items()
-                             if voice in KOKORO_VOICES.get(code, {})), None)
-            if lang is None:
-                return f"Kokoro voice '{voice}' is not available"
-            self.engine_var.set(name)
-            self._on_engine_change(name)
-            self.kokoro_lang_var.set(lang)
-            self._update_kokoro_voices(lang)
-            self.kokoro_voice_var.set(voice)
-            self._apply_speed(kind, sel.get("speed"))
-            return None
-
-        target = None
-        if voice is not None:
-            options = self._voice_options(kind)
-            target = voice if voice in options else next(
-                (k for k, v in options.items() if v == voice), None)
-            if target is None:
-                return f"voice '{voice}' is not available in {name.split(' (')[0]}"
-        self.engine_var.set(name)
+        r = self._resolve_selection(sel)
+        if isinstance(r, str):
+            return r
+        name, kind, lang, voice = r
+        self._engine_menu.setCurrentText(name)
         self._on_engine_change(name)
-        var = {"edge": self.edge_voice_var, "piper": self.piper_voice_var, "melo": self.melo_voice_var,
-               "pyttsx3": self.pyttsx3_voice_var, "gtts": self.gtts_lang_var}.get(kind)
-        if var is not None and target is not None:
-            var.set(target)
+        if kind == "kokoro":
+            self._kokoro_lang.blockSignals(True)
+            self._kokoro_lang.setCurrentText(lang)
+            self._kokoro_lang.blockSignals(False)
+            self._update_kokoro_voices(lang)
+            self._kokoro_voice.setCurrentText(voice)
+        else:
+            menu = self._voice_menu(kind)
+            if menu is not None and voice is not None:
+                menu.setCurrentText(voice)
         self._apply_speed(kind, sel.get("speed"))   # older voices have none: speed is left alone
         return None
 
-    # ── Settings accessor ──────────────────────────────────────────
+    def settings_for_selection(self, sel):
+        """get_settings() with sel's engine, voice and speed in place of the dropdowns."""
+        return voice_selection.settings_for_selection(self.get_settings(), sel, self.engine_names(),
+                                                      self._system_voices)
 
+    # ── settings ───────────────────────────────────────────────────
     def get_settings(self) -> dict:
-        """Return a dict of all current engine settings for the generator."""
+        """All current engine settings for the generator (same keys as the CTk panel)."""
         voice_id = ""
         for name, vid in self._system_voices:
-            if name == self.pyttsx3_voice_var.get():
+            if name == self._pyttsx3_voice.currentText():
                 voice_id = vid
                 break
         return {
-            "engine_name":   self.engine_var.get(),
-            "use_gpu":       self.gpu_var.get(),
-            "gtts_lang_key": self.gtts_lang_var.get(),
-            "edge_voice_key": self.edge_voice_var.get(),
-            "edge_rate":     self.edge_rate_var.get(),
-            "kokoro_lang_code":  KOKORO_LANGS[self.kokoro_lang_var.get()],
-            "kokoro_voice_key": self.kokoro_voice_var.get(),
-            "kokoro_speed":     self.kokoro_speed_var.get(),
-            "piper_voice_key": PIPER_VOICES[self.piper_voice_var.get()],
-            "melo_voice_cfg": MELO_VOICES[self.melo_voice_var.get()],
-            "melo_speed":      self.melo_speed_var.get(),
+            "engine_name":      self._engine_menu.currentText(),
+            "use_gpu":          self._gpu.isChecked(),
+            "gtts_lang_key":    self._gtts_lang.currentText(),
+            "edge_voice_key":   self._edge_voice.currentText(),
+            "edge_rate":        int(self._edge_rate.value_f()),
+            "kokoro_lang_code": KOKORO_LANGS[self._kokoro_lang.currentText()],
+            "kokoro_voice_key": self._kokoro_voice.currentText(),
+            "kokoro_speed":     self._kokoro_speed.value_f(),
+            "piper_voice_key":  PIPER_VOICES[self._piper_voice.currentText()],
+            "melo_voice_cfg":   MELO_VOICES[self._melo_voice.currentText()],
+            "melo_speed":       self._melo_speed.value_f(),
             "pyttsx3_voice_id": voice_id,
-            "pyttsx3_rate":  self.rate_var.get(),
-            "pyttsx3_volume": self.volume_var.get(),
+            "pyttsx3_rate":     int(self._rate.value_f()),
+            "pyttsx3_volume":   self._volume.value_f(),
         }

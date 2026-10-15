@@ -104,11 +104,11 @@ def candidates(engine_names, system_voices):
     Online engines (gTTS, Edge) are left out.
     """
     from core.constants import KOKORO_LANGS, KOKORO_VOICES, MELO_VOICES, PIPER_VOICES
-    from ui.panels.engine_panel import EnginePanel
+    from core.voice_selection import engine_kind
     out = []
     by_kind = {}
     for name in engine_names:
-        kind = EnginePanel.engine_kind(name)
+        kind = engine_kind(name)
         if kind in ("kokoro", "melo", "piper", "pyttsx3"):
             by_kind.setdefault(kind, name)
     short = {k: v.split(" (")[0] for k, v in by_kind.items()}
@@ -417,15 +417,14 @@ def rate_unit(lang):
 
 # ── building the bank ───────────────────────────────────────────────
 
-def build_bank(app, eng_settings, cands, progress=None, check_cancel=None):
+def build_bank(synth, eng_settings, cands, progress=None, check_cancel=None):
     """Synthesize and measure every candidate missing from the bank. Resumable.
 
-    app: the AditsVoiceStudioApp (engines, _engine_kwargs, _engine_lock).
+    synth: the app's core.synth.Synthesizer.
     eng_settings: EnginePanel.get_settings() snapshot used as defaults.
     progress(fraction, message).
     Returns the bank.
     """
-    import torch
     from core.audio_io import load_segment
     from core.voice_cloning import get_client
     from core.voice_cloning import pitch as pitch_mod
@@ -437,7 +436,6 @@ def build_bank(app, eng_settings, cands, progress=None, check_cancel=None):
     samples.mkdir(parents=True, exist_ok=True)
     todo = missing(bank, cands)              # new, engine changed, or failed in an older version
     t0 = time.monotonic()
-    use_gpu = bool(eng_settings.get("use_gpu")) and torch.cuda.is_available()
 
     for i, c in enumerate(todo):
         if check_cancel:
@@ -451,17 +449,14 @@ def build_bank(app, eng_settings, cands, progress=None, check_cancel=None):
         entry = {"label": c["label"], "kind": c["kind"], "lang": c["lang"], "engine": c["engine"],
                  "fp": engine_fingerprint(c), "app_version": _app_version(),
                  "selection": c["selection"]}
-        engine = app._engine_map.get(c["engine"])
         text = SENTENCES.get(c["lang"] or "en", SENTENCES["en"])
         tmp = Path(bank_dir()) / "tmp"
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
         try:
             settings = dict(eng_settings, engine_name=c["engine"], **c["overrides"])
-            kwargs = app._engine_kwargs(settings, "cuda" if use_gpu else "cpu", lambda m: None,
-                                        lambda: bool(check_cancel and _cancelled(check_cancel)))
-            with app._engine_lock:
-                res = engine.synthesize(text, str(tmp), **kwargs)
+            res = synth.synthesize(text, str(tmp), settings,
+                                   check_cancel=lambda: bool(check_cancel and _cancelled(check_cancel)))
             wav = samples / (hashlib.sha1(c["id"].encode()).hexdigest()[:16] + ".wav")
             load_segment(res["playback_file"]).set_channels(1).export(str(wav), format="wav")
             entry.update(wav=wav.name, f0=pitch_mod.median_f0(str(wav), max_seconds=10),
@@ -497,6 +492,37 @@ def _cancelled(check_cancel):
         return True
 
 
+_SPEED_KEYS = {"kokoro": "kokoro_speed", "melo": "melo_speed", "pyttsx3": "pyttsx3_rate"}
+
+
+def speak_settings(eng_settings, cand, speed=None) -> dict:
+    """The EnginePanel.get_settings()-style dict speak() uses for *cand* at *speed*."""
+    overrides = dict(cand["overrides"])
+    key = _SPEED_KEYS.get(cand["kind"])
+    if key and speed is not None:
+        overrides[key] = speed
+    return dict(eng_settings, engine_name=cand["engine"], **overrides)
+
+
+def speak(synth, eng_settings, cand, text, out_wav, speed=None, check_cancel=None):
+    """Synthesize text with one candidate voice into a mono WAV at out_wav.
+
+    speed: a suggested_speed() value (Kokoro / Melo speed, pyttsx3 WPM); None keeps
+    the candidate's default. Used by the analyzer's Result (the clip's transcript).
+    """
+    import tempfile
+    from core.audio_io import load_segment
+    settings = speak_settings(eng_settings, cand, speed)
+    tmp = tempfile.mkdtemp(prefix="adits_vs_speak_", dir=os.path.dirname(str(out_wav)))
+    try:
+        res = synth.synthesize(text, tmp, settings,
+                               check_cancel=lambda: bool(check_cancel and _cancelled(check_cancel)))
+        load_segment(res["playback_file"]).set_channels(1).export(str(out_wav), format="wav")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return str(out_wav)
+
+
 # ── clip analysis and ranking ───────────────────────────────────────
 
 def analyze_clip(path, embed_fn, progress=None):
@@ -505,10 +531,22 @@ def analyze_clip(path, embed_fn, progress=None):
     f0_unsure: over F0_FLOOR_SHARE of the voiced frames sit at the tracker's
     floor; f0 is then the median of the frames above it.
     """
+    import threading
     from core.subtitles import get_whisper_model
     from core.voice_cloning import pitch as pitch_mod
     say = progress or (lambda f, m: None)
     import numpy as np
+    # The voiceprint comes from the Seed-VC worker, a separate process, so it
+    # runs while this thread measures pitch and Whisper transcribes.
+    emb_box = {}
+
+    def _embed():
+        try:
+            emb_box["emb"] = embed_fn(str(path))
+        except BaseException as e:      # re-raised below, on the caller's thread
+            emb_box["err"] = e
+    emb_thread = threading.Thread(target=_embed, daemon=True, name="voice-match-embed")
+    emb_thread.start()
     say(0.1, "Measuring pitch…")
     frames = pitch_mod.voiced_f0(str(path), max_seconds=45)
     f0, unsure = (float(np.median(frames)) if frames.size >= 20 else None), False
@@ -523,7 +561,10 @@ def analyze_clip(path, embed_fn, progress=None):
     text = " ".join(s.text.strip() for s in segments)
     lang = info.language
     say(0.75, "Measuring the voiceprint…")
-    emb = embed_fn(str(path))
+    emb_thread.join()
+    if "err" in emb_box:
+        raise emb_box["err"]
+    emb = emb_box.get("emb")
     return {"f0": f0, "f0_unsure": unsure, "gender": gender_guess(f0, unsure), "lang": lang,
             "lang_prob": round(float(info.language_probability or 0), 2),
             "rate": rate(text, lang, str(path)), "text": text, "emb": emb,

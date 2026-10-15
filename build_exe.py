@@ -41,10 +41,11 @@ _REQUIRED = {
     "librosa":        "MeloTTS audio processing",
     "pyttsx3":        "pyttsx3 engine",
     "faster_whisper": "word-level subtitles",
-    "customtkinter":  "GUI",
+    "PySide6":        "GUI (Qt window)",
     "soundfile":      "audio I/O and MP3 export",
     "pyaudio":        "Clone Voice microphone recording",
     "av":             "Clone Voice clip import (M4A, AAC, WebM, WMA...)",
+    "pysubs2":        "Text Input caption import",
 }
 
 # Left out of the public build on purpose:
@@ -68,6 +69,7 @@ _PRUNE_GLOBS = [
 _PRUNE_DIRS = [
     "torch/include", "pygame/tests", "pygame/docs", "pygame/examples",
     "jieba/lac_small",          # needs paddle, which is not installed
+    "PySide6/translations",     # Qt's own UI strings in other languages; the app is English
 ]
 
 _WHISPER_REPO  = "Systran/faster-whisper-base"
@@ -247,6 +249,10 @@ def _write_notices():
         rows.append(f"  {name} {dist.version}\n      License: {lic}\n      {url}".rstrip())
         for f in dist.files or []:
             fn = Path(str(f)).name.upper()
+            # PySide6 / shiboken6 ship only Qt's commercial license file; this
+            # app uses Qt under the LGPL-3.0 (see NOTICES_HEADER.txt).
+            if fn == "LICENSEREF-QT-COMMERCIAL.TXT":
+                continue
             if ".dist-info" in str(f) and fn.startswith(("LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS")):
                 try:
                     body = Path(f.locate()).read_text(encoding="utf-8", errors="replace")
@@ -350,7 +356,7 @@ def build(args):
         "--splash", str(BASE_DIR / "assets" / "splash.png"),
         "--version-file", str(version_file),
     ]
-    for pkg in ("torch", "transformers", "customtkinter", "kokoro", "language_tags",
+    for pkg in ("torch", "transformers", "kokoro", "language_tags",
                 "espeakng_loader", "faster_whisper", "kokoro_onnx", "melo", "g2p_en",
                 "unidic_lite", "unidic", "gruut", "gruut_lang_en", "gruut_lang_es",
                 "gruut_lang_fr", "cached_path", "nltk", "pykakasi", "regex", "jamo",

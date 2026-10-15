@@ -43,3 +43,27 @@ class BaseTTSEngine(ABC):
           save_ext      : str  – default file extension, e.g. ".mp3" or ".wav"
         """
         ...
+
+    def warm_up(self, **kwargs) -> None:
+        """Load what synthesize() with these kwargs will need, so the first
+        Generate does not wait for it. Same kwargs as synthesize(). Optional:
+        engines with nothing to load (online, system voices) keep this no-op."""
+        return None
+
+    def release_gpu(self) -> None:
+        """Drop GPU models this engine holds itself (not those in MODEL_CACHE)."""
+        return None
+
+    def _speak_once(self, **kwargs) -> None:
+        """A warm_up() body: speak "Hello." into a temp folder and drop it.
+
+        Loading the model alone leaves work for the first real call (MeloTTS's
+        BERT, Kokoro's phonemizer and CUDA kernels): MeloTTS's first Generate
+        still took 6.2 s after loading only the model, against 1.1 s warm."""
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp(prefix="adits_vs_warm_")
+        try:
+            self.synthesize("Hello.", d, **dict(kwargs, kokoro_subtitle=False))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
